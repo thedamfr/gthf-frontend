@@ -245,6 +245,44 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     assert.equal(await this.operationCount(key), 1);
     return { key, interruptedExplicitly: true, retriedMediaId: media.id };
   }
+  async revokedAuthorization() {
+    const current = await this.admin('/admin/users/me');
+    const user = current.data ?? current;
+    const roles = user.roles.map((role) => role.id);
+    const created = await this.admin('/admin/roles', { method: 'POST', token: this.otherToken,
+      json: { name: 'Recovery revoked ' + randomUUID().slice(0, 8), description: 'Synthetic interruption with revoked permissions' } });
+    const role = created.data ?? created;
+    const key = randomUUID(); await this.gate('before-commit', key);
+    const request = this.upload(key).then(() => true, () => false);
+    await this.observed('before-commit', key);
+    const objects = await this.operationObjects(key); await this.assertObjects(objects);
+    let rtoMs;
+    try {
+      await this.admin('/admin/users/' + user.id, { method: 'PUT', token: this.otherToken, json: { roles: [role.id] } });
+      const interruptedAt = Date.now(); await this.signal('cms');
+      assert.equal(await request, false); await this.applications();
+      await this.eventually('Revoked actor cannot commit during autonomous recovery', async () => {
+        const value = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-c',
+          "SELECT state||':'||coalesce(failure,'') FROM gthf_media_operations WHERE key='" + key + "'"]);
+        return value.stdout.toString().trim() === 'failed:AUTHORIZATION_REVOKED';
+      });
+      rtoMs = Date.now() - interruptedAt; assert.ok(rtoMs <= DEADLINE);
+      const files = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-c',
+        "SELECT count(*) FROM files f JOIN gthf_media_operations o ON o.key='" + key + "' WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(o.manifest->'files') p WHERE p->'values'->>'hash'=f.hash)"]);
+      assert.equal(Number(files.stdout.toString().trim()), 0);
+      await this.eventually('Objects of the revoked operation are cleaned automatically', async () => {
+        for (const object of objects) if ((await this.request('minio', '/' + this.bench.manifest.bucket + '/' + object.key, { allow: [404] })).status !== 404) return false;
+        return true;
+      });
+    } finally {
+      await this.admin('/admin/users/' + user.id, { method: 'PUT', token: this.otherToken, json: { roles } });
+      await this.login();
+    }
+    const receipt = (await this.receipt(key, 'failed')).value;
+    assert.equal(receipt.error, 'AUTHORIZATION_REVOKED'); assert.equal(receipt.retryable, false);
+    await assert.rejects(this.upload(key)); assert.equal(await this.operationCount(key), 1);
+    return { key, rtoMs, currentRightsCheckedDuringRecovery: true, noFileCommitted: true, objectsCleaned: objects.length, terminalReplayPreserved: true };
+  }
   async completeUploadPowerCut() {
     const key = randomUUID(); await this.gate('before-commit', key);
     const request = this.upload(key).then(() => ({ succeeded: true }), () => ({ succeeded: false }));
@@ -479,6 +517,7 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     await this.scenario('Golden Journey: acknowledged publication, media and receipt permissions', () => this.acknowledgement());
     await this.scenario('Golden Journey: interrupted editing and publication preserve acknowledged drafts', () => this.interruptedPublication());
     await this.scenario('Golden Journey: interrupted upload retries the same intent', () => this.interruptedUpload());
+    await this.scenario('Golden Journey: revoked permissions prevent autonomous media commit after a crash', () => this.revokedAuthorization());
     await this.scenario('Golden Journey: partially uploaded image derivatives are cleaned before retry', () => this.partialDerivativeUpload());
     await this.scenario('Golden Journey: durable S3 upload survives real VM power cut', () => this.completeUploadPowerCut());
     await this.scenario('Golden Journey: late PostgreSQL and S3, second crash during recovery', () => this.lateDependenciesAndSecondCrash());

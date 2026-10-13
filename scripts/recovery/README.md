@@ -29,6 +29,8 @@ remplacement, la suppression, les dépendances tardives et un deuxième crash
 pendant la reprise. Ils couvrent aussi publication interrompue, cache public
 chaud/froid, processus mort/bloqué, preview et révocation confirmée. La reprise
 métier doit se terminer en 300 secondes après retour des dépendances.
+Un SIGKILL après réception des objets et révocation des droits vérifie que la
+reprise autonome refuse le commit et nettoie ces objets, sans créer de média.
 Une image avec plusieurs formats vérifie le nettoyage d’un transfert partiel.
 La panne frontend dure réellement plus de 300 secondes pour dépasser les TTL ;
 les assertions portent sur les publications, les villes et les octets GPX/géométrie.
