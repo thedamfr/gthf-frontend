@@ -40,6 +40,9 @@ et le nettoyage. La production ne reçoit aucune écriture de cette suite.
 Les tests utilisent les applications et données réelles de recette, sans
 navigateur ; ils ne valident pas le rendu visuel ni les interactions JavaScript.
 Un build, une fixture locale ou un HTTP 200 seul ne remplace pas ces parcours.
+Le playbook historique `deploy.yml` refuse désormais toute mutation avant de
+vérifier la preuve privée de migration qualifiée et les identités réelles du
+namespace, du PVC et de son PV préservé. Il ne peut pas amorcer une base vide.
 
 ## Annexes
 
@@ -99,3 +102,44 @@ sauvegardés avec leurs volumes et images compatibles. Cette procédure ne
 prescrit ni suppression de données, ni restauration destructive, ni double
 montage concurrent de PostgreSQL. Les anciens états et manifestes conservés
 servent au retour arrière, sans réécriture de leur historique.
+
+### Protection du playbook historique après migration
+
+Le retour Copilot [discussion #4263122333](https://github.com/thedamfr/gthf-frontend/pull/41#discussion_r4263122333)
+a identifié qu'un `apply -k` sur le nouveau namespace pouvait sinon provisionner
+un PVC vide. Le playbook invoque `require-qualified-storage.py` avant toute
+mutation Kubernetes. Une preuve absente, une qualification incomplète, un
+namespace recréé, un PVC non lié ou une divergence de PV/UID/hostPath bloque
+l'application. Ce garde-fou ne participe pas à l'amorçage du script de migration.
+
+Après les Golden Journeys réels de staging **et** production, l'opérateur
+consigne `/home/ubuntu/gthf-delivery/rename-qualified.json`, fichier régulier
+privé mode 600 détenu par `ubuntu`. Son schéma est le suivant ; les valeurs
+entre chevrons doivent être remplacées par les valeurs vérifiées, jamais par
+un état simulé :
+
+```json
+{
+  "schemaVersion": 1,
+  "status": "qualified",
+  "namespace": "gthf-staging",
+  "namespaceUid": "<UID du namespace vérifié>",
+  "qualifiedAt": "<date UTC ISO-8601 des Golden Journeys>",
+  "runtimeRevisions": { "frontend": "<SHA servi de 40 caractères>", "cms": "<SHA servi de 40 caractères>" },
+  "goldenJourneys": { "staging": "passed", "production": "passed" },
+  "storage": {
+    "pvc": "gthf-postgres",
+    "pvcUid": "<UID du PVC vérifié>",
+    "pv": "gthf-staging-postgres-preserved",
+    "pvUid": "<UID du PV vérifié>",
+    "hostPath": "<chemin existant conservé et vérifié>"
+  }
+}
+```
+
+Le PV doit rester `Bound`, avec rétention `Retain`, affinité de nœud et
+`claimRef` correspondant au namespace, au nom et à l'UID du PVC. Le garde-fou
+ne lit aucun Secret. `npm run test:delivery` couvre les volumes absents,
+nouvellement provisionnés, réattribués, les mauvais chemins et les preuves
+incomplètes. Les preuves du code de garde-fou sont distinctes des SHA runtime
+construits avant cette correction d'infrastructure.

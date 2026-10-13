@@ -8,12 +8,20 @@
     gthf_overlay_dir: /home/production/gthf-staging-prep/frontend/infrastructure/kubernetes/overlays/staging
     gthf_secret_file: /home/production/gthf-staging-prep/secrets.env
     gthf_wait_for_frontend: true
+    gthf_rename_evidence: /home/ubuntu/gthf-delivery/rename-qualified.json
   tasks:
     - name: Refuse a namespace outside the GTHF staging boundary
       ansible.builtin.assert:
         that:
           - gthf_namespace == "gthf-staging"
         fail_msg: This playbook may only deploy into gthf-staging.
+
+    - name: Require qualified migrated storage before any Kubernetes mutation
+      ansible.builtin.script:
+        cmd: "../../delivery/require-qualified-storage.py --namespace {{ gthf_namespace | quote }} --evidence {{ gthf_rename_evidence | quote }}"
+        executable: python3
+      changed_when: false
+      check_mode: false
 
     - name: Inspect the Kustomize overlay
       ansible.builtin.stat:
