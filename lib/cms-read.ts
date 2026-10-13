@@ -48,5 +48,22 @@ export async function readCmsJson<T>(url: string, options: CmsReadOptions): Prom
     }
   };
   if (!options.public) return load();
-  return (options.cache ?? publicCache).read({ key, scope, ttlMs: options.revalidate * 1000, load });
+  const entityTags = (value: T): string[] => {
+    const data = (value as { data: unknown }).data;
+    return (Array.isArray(data) ? data : [data]).flatMap((record) => {
+      if (!record || typeof record !== 'object') return [];
+      return ['documentId', 'slug', 'id'].flatMap((field) => field in record ? [`${field}:${String(record[field])}`] : []);
+    });
+  };
+  return (options.cache ?? publicCache).read({ key, scope, ttlMs: options.revalidate * 1000, load,
+    tags: parsed.pathname === '/api/global' ? undefined : entityTags,
+    revokedTags: (value) => {
+      const data = (value as { data: unknown }).data;
+      if (data !== null && (!Array.isArray(data) || data.length !== 0)) return [];
+      return ['documentId', 'slug', 'id'].flatMap((field) => {
+        const requested = parsed.searchParams.get(`filters[${field}][$eq]`);
+        return requested === null ? [] : [`${field}:${requested}`];
+      });
+    },
+  });
 }

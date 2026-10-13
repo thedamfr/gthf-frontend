@@ -10,12 +10,14 @@ export class PublicContentRejected extends Error {
   constructor(status: number) { super(`Public content rejected (${status})`); this.status = status; this.name = 'PublicContentRejected'; }
 }
 
-interface Entry<T> { value: T; serialized: string; bytes: number; checkedAt: number; failedAt?: number; scope: string }
+interface Entry<T> { value: T; serialized: string; bytes: number; checkedAt: number; failedAt?: number; scope: string; tags: string[] }
 interface LoadOptions<T> {
   key: string;
   scope: string;
   ttlMs: number;
   load: () => Promise<T>;
+  tags?: (value: T) => string[];
+  revokedTags?: (value: T) => string[];
 }
 
 export class PublicContentCache {
@@ -30,10 +32,12 @@ export class PublicContentCache {
     this.maximumBytes = maximumBytes; this.now = now; this.maximumEntries = maximumEntries;
   }
 
-  invalidate(scope: string) {
+  invalidate(scope: string, tags?: string[]) {
     this.generations.set(scope, (this.generations.get(scope) ?? 0) + 1);
     for (const [key, entry] of this.entries) {
-      if (entry.scope === scope) { this.entries.delete(key); this.bytes -= entry.bytes; }
+      if (entry.scope === scope && (!tags || entry.tags.some((tag) => tags.includes(tag)))) {
+        this.entries.delete(key); this.bytes -= entry.bytes;
+      }
     }
   }
 
@@ -70,7 +74,12 @@ export class PublicContentCache {
     const serialized = JSON.stringify(value);
     const bytes = new TextEncoder().encode(serialized).byteLength;
     // A confirmed update/withdrawal also invalidates other queries of this collection.
-    if (previous && previous.serialized !== serialized) this.invalidate(options.scope);
+    const tags = options.tags?.(value) ?? [];
+    if (previous && previous.serialized !== serialized) {
+      this.invalidate(options.scope, options.tags ? [...previous.tags, ...tags] : undefined);
+    }
+    const revoked = options.revokedTags?.(value) ?? [];
+    if (revoked.length) this.invalidate(options.scope, revoked);
     const existing = this.entries.get(options.key);
     if (existing) { this.entries.delete(options.key); this.bytes -= existing.bytes; }
     if (bytes <= this.maximumBytes) {
@@ -78,7 +87,7 @@ export class PublicContentCache {
         const [key, oldest] = this.entries.entries().next().value!;
         this.entries.delete(key); this.bytes -= oldest.bytes;
       }
-      this.entries.set(options.key, { value: structuredClone(value), serialized, bytes, checkedAt: this.now(), scope: options.scope });
+      this.entries.set(options.key, { value: structuredClone(value), serialized, bytes, checkedAt: this.now(), scope: options.scope, tags });
       this.bytes += bytes;
     }
     return value;

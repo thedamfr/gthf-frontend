@@ -71,6 +71,21 @@ test('semantic validation happens before caching, and credentials partition cach
   await assert.rejects(readCmsJson(url, { ...base, token: 'other', fetchImpl: async () => { throw new Error('offline'); } }), PublicContentUnavailable);
 });
 
+test('a confirmed empty result through another query invalidates earlier collection representations', async () => {
+  const cache = new PublicContentCache();
+  await readCmsJson(url, { public: true, revalidate: 60, cache, fetchImpl: async () => Response.json({ data: [{ slug: 'old-publication', title: 'old publication' }] }) });
+  await readCmsJson(url + '&filters[slug][$eq]=old-publication', { public: true, revalidate: 60, cache, fetchImpl: async () => Response.json({ data: [] }) });
+  await assert.rejects(readCmsJson(url, { public: true, revalidate: 60, cache, fetchImpl: async () => { throw new Error('offline'); } }), PublicContentUnavailable);
+});
+
+test('an empty unrelated query cannot evict a warm article needed during an outage', async () => {
+  const cache = new PublicContentCache();
+  const options = { public: true, revalidate: 60, cache };
+  await readCmsJson(url, { ...options, fetchImpl: async () => Response.json({ data: [{ slug: 'warm' }] }) });
+  await readCmsJson(url + '&filters[slug][$eq]=unrelated', { ...options, fetchImpl: async () => Response.json({ data: [] }) });
+  assert.deepEqual(await readCmsJson(url, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), { data: [{ slug: 'warm' }] });
+});
+
 test('concurrent loads cannot reinstate content after an authoritative invalidation', async () => {
   const cache = new PublicContentCache();
   let complete!: (value: object) => void;
