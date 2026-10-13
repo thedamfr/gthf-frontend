@@ -3,13 +3,13 @@ kind: Issuer
 metadata:
   name: letsencrypt-production-http01
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
 spec:
   acme:
     email: devs@saletesincere.fr
     server: https://acme-v02.api.letsencrypt.org/directory
     privateKeySecretRef:
-      name: gthdf-letsencrypt-account
+      name: gthf-letsencrypt-account
     solvers:
       - http01:
           ingress:

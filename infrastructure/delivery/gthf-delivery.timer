@@ -5,7 +5,7 @@ Description=Check for validated GTHF releases every minute
 OnBootSec=60s
 OnUnitInactiveSec=60s
 AccuracySec=5s
-Unit=gthdf-delivery.service
+Unit=gthf-delivery.service
 
 [Install]
 WantedBy=timers.target

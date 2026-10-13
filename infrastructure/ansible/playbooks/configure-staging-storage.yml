@@ -8,9 +8,9 @@
       ansible.builtin.script:
         cmd: ../../delivery/configure-staging-storage.py
         executable: python3
-      register: gthdf_storage
-      changed_when: (gthdf_storage.stdout | from_json).changed
+      register: gthf_storage
+      changed_when: (gthf_storage.stdout | from_json).changed
 
     - name: Show the non-secret storage destination
       ansible.builtin.debug:
-        msg: "{{ gthdf_storage.stdout | from_json }}"
+        msg: "{{ gthf_storage.stdout | from_json }}"

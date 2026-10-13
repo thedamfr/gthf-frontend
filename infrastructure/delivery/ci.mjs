@@ -17,9 +17,9 @@ const revision = process.env.GITHUB_SHA;
 if (!/^[a-f0-9]{40}$/.test(revision ?? '') || process.env.GITHUB_REF !== 'refs/heads/main') throw new Error('Only the exact main revision may be published');
 if (run('git', ['-C', repository, 'rev-parse', 'HEAD']).trim() !== revision) throw new Error('Checkout does not match the event');
 const deployerRevision = run('git', ['-C', deployer, 'rev-parse', 'HEAD']).trim();
-const output = resolve(process.env.RUNNER_TEMP ?? '.', 'gthdf-release');
+const output = resolve(process.env.RUNNER_TEMP ?? '.', 'gthf-release');
 mkdirSync(output, { recursive: true });
-const githubRepository = `thedamfr/gthdf-${component}`;
+const githubRepository = `thedamfr/gthf-${component}`;
 async function github(path, { method = 'GET', body, allowMissing = false } = {}) {
   const response = await fetch(`https://api.github.com/repos/${githubRepository}/${path}`, {
     method, headers: { Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GH_TOKEN}`, 'X-GitHub-Api-Version': '2022-11-28' },
@@ -30,7 +30,7 @@ async function github(path, { method = 'GET', body, allowMissing = false } = {})
   return response.json();
 }
 let baseline;
-const previousFile = await github('contents/candidate.json?ref=gthdf-release', { allowMissing: true });
+const previousFile = await github('contents/candidate.json?ref=gthf-release', { allowMissing: true });
 if (previousFile) {
   if (previousFile.size > 262144 || previousFile.encoding !== 'base64') throw new Error('Invalid publication baseline');
   const published = JSON.parse(Buffer.from(previousFile.content, 'base64').toString('utf8'));
@@ -40,7 +40,7 @@ if (previousFile) {
 const previous = baseline?.components?.[component];
 const fingerprints = gitFingerprints(repository, revision);
 const plan = planDelivery(fingerprints, previous?.fingerprints);
-const imageName = `ghcr.io/thedamfr/gthdf-${component}`;
+const imageName = `ghcr.io/thedamfr/gthf-${component}`;
 const tag = `${imageName}:sha-${revision}`;
 let image = previous?.image;
 let imageRevision = previous?.revision;
@@ -52,7 +52,7 @@ if (plan.build) {
     digest = JSON.parse(existing.stdout).digest;
   } else {
     const metadata = join(output, 'build.json');
-    run('docker', ['buildx', 'build', repository, '--file', join(repository, 'Dockerfile'), '--platform', 'linux/amd64', '--provenance=false', '--sbom=false', '--push', '--tag', tag, '--build-arg', `GTHDF_REVISION=${revision}`, '--metadata-file', metadata], { stdio: 'inherit' });
+    run('docker', ['buildx', 'build', repository, '--file', join(repository, 'Dockerfile'), '--platform', 'linux/amd64', '--provenance=false', '--sbom=false', '--push', '--tag', tag, '--build-arg', `GTHF_REVISION=${revision}`, '--metadata-file', metadata], { stdio: 'inherit' });
     digest = JSON.parse(readFileSync(metadata, 'utf8'))['containerimage.digest'];
   }
   if (!/^sha256:[a-f0-9]{64}$/.test(digest ?? '')) throw new Error('Missing immutable build digest');

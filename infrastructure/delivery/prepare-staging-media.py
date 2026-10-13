@@ -12,7 +12,7 @@ directory = pathlib.Path(__file__).parent
 spec = importlib.util.spec_from_file_location('release', directory / 'release.py')
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
-root = pathlib.Path('/home/ubuntu/gthdf-delivery')
+root = pathlib.Path('/home/ubuntu/gthf-delivery')
 
 
 def apply(value):
@@ -32,22 +32,22 @@ def main():
         if not access:
             access = {'email': 'recette@gthf.invalid', 'password': secrets.token_urlsafe(36), 'gatewayPassword': secrets.token_urlsafe(36), 'sessionKey': secrets.token_hex(32)}
             release.save_json(access_file, access)
-        secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'namespace': 'gthdf-qualification', 'name': 'gthdf-staging-access'}, 'type': 'Opaque', 'data': {key: base64.b64encode(value.encode()).decode() for key, value in {'password': access['gatewayPassword'], 'session-key': access['sessionKey'], 'admin-password': access['password']}.items()}}
+        secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'namespace': 'gthf-qualification', 'name': 'gthf-staging-access'}, 'type': 'Opaque', 'data': {key: base64.b64encode(value.encode()).decode() for key, value in {'password': access['gatewayPassword'], 'session-key': access['sessionKey'], 'admin-password': access['password']}.items()}}
         # Use create/patch stdin so credential data never enters process arguments.
-        current = release.kubectl('staging', 'get', 'secret', 'gthdf-staging-access', '--ignore-not-found', '-o', 'json')
+        current = release.kubectl('staging', 'get', 'secret', 'gthf-staging-access', '--ignore-not-found', '-o', 'json')
         if current:
-            release.kubectl('staging', 'patch', 'secret', 'gthdf-staging-access', '--type=merge', '--patch-file=/dev/stdin', data=json.dumps({'data': secret['data']}).encode())
+            release.kubectl('staging', 'patch', 'secret', 'gthf-staging-access', '--type=merge', '--patch-file=/dev/stdin', data=json.dumps({'data': secret['data']}).encode())
         else:
             release.kubectl('staging', 'create', '-f', '-', data=json.dumps(secret).encode())
         policy = json.loads(release.kubectl('production', 'get', 'networkpolicy', 'allow-cms-egress', '-o', 'json'))
-        apply({'apiVersion': policy['apiVersion'], 'kind': policy['kind'], 'metadata': {'namespace': 'gthdf-qualification', 'name': policy['metadata']['name']}, 'spec': policy['spec']})
-        source = 'docker.io/library/gthdf-cms:staging'
+        apply({'apiVersion': policy['apiVersion'], 'kind': policy['kind'], 'metadata': {'namespace': 'gthf-qualification', 'name': policy['metadata']['name']}, 'spec': policy['spec']})
+        source = 'docker.io/library/gthf-cms:staging'
         rows = release.command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'images', 'ls']).decode().splitlines()
         row = next((row.split() for row in rows if row.startswith(source + ' ')), None)
         if not row:
             raise RuntimeError('The known local CMS image is unavailable')
         digest = row[2]
-        alias = 'docker.io/library/gthdf-cms:qualified-' + digest.split(':')[1]
+        alias = 'docker.io/library/gthf-cms:qualified-' + digest.split(':')[1]
         previous_alias = next((row.split() for row in rows if row.startswith(alias + ' ')), None)
         if previous_alias and previous_alias[2] != digest:
             raise RuntimeError('The local immutable CMS alias differs')
@@ -55,9 +55,9 @@ def main():
             release.command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'images', 'tag', source, alias])
         script = (directory / 'prepare-delivery-staging.mjs').read_text()
         script_hash = hashlib.sha256(script.encode()).hexdigest()
-        script_name = 'gthdf-staging-data-script-' + script_hash[:12]
-        apply({'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'namespace': 'gthdf-qualification', 'name': script_name}, 'immutable': True, 'data': {'prepare-delivery-staging.mjs': script}})
-        source_deployment = json.loads(release.kubectl('production', 'get', 'deployment', 'gthdf-cms', '-o', 'json'))
+        script_name = 'gthf-staging-data-script-' + script_hash[:12]
+        apply({'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'namespace': 'gthf-qualification', 'name': script_name}, 'immutable': True, 'data': {'prepare-delivery-staging.mjs': script}})
+        source_deployment = json.loads(release.kubectl('production', 'get', 'deployment', 'gthf-cms', '-o', 'json'))
         template = copy.deepcopy(source_deployment['spec']['template'])
         template['metadata'].pop('annotations', None)
         pod = template['spec']
@@ -73,14 +73,14 @@ def main():
         for probe in ('startupProbe', 'readinessProbe', 'livenessProbe', 'lifecycle'):
             container.pop(probe, None)
         container.setdefault('env', []).extend([
-            {'name': 'GTHDF_NAMESPACE', 'valueFrom': {'fieldRef': {'fieldPath': 'metadata.namespace'}}},
-            {'name': 'STRAPI_API_TOKEN', 'valueFrom': {'secretKeyRef': {'name': 'gthdf-secrets', 'key': 'STRAPI_API_TOKEN'}}},
-            {'name': 'STAGING_ADMIN_PASSWORD', 'valueFrom': {'secretKeyRef': {'name': 'gthdf-staging-access', 'key': 'admin-password'}}},
+            {'name': 'GTHF_NAMESPACE', 'valueFrom': {'fieldRef': {'fieldPath': 'metadata.namespace'}}},
+            {'name': 'STRAPI_API_TOKEN', 'valueFrom': {'secretKeyRef': {'name': 'gthf-secrets', 'key': 'STRAPI_API_TOKEN'}}},
+            {'name': 'STAGING_ADMIN_PASSWORD', 'valueFrom': {'secretKeyRef': {'name': 'gthf-staging-access', 'key': 'admin-password'}}},
         ])
         container.setdefault('volumeMounts', []).append({'name': 'data-script', 'mountPath': '/app/scripts/prepare-delivery-staging.mjs', 'subPath': 'prepare-delivery-staging.mjs', 'readOnly': True})
         pod.setdefault('volumes', []).append({'name': 'data-script', 'configMap': {'name': script_name}})
-        name = 'gthdf-staging-data-' + str(int(time.time()))
-        apply({'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {'namespace': 'gthdf-qualification', 'name': name}, 'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 1200, 'ttlSecondsAfterFinished': 86400, 'template': template}})
+        name = 'gthf-staging-data-' + str(int(time.time()))
+        apply({'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {'namespace': 'gthf-qualification', 'name': name}, 'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 1200, 'ttlSecondsAfterFinished': 86400, 'template': template}})
         deadline = time.monotonic() + 1260
         while time.monotonic() < deadline:
             state = json.loads(release.kubectl('staging', 'get', 'job', name, '-o', 'json'))['status']

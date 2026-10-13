@@ -50,7 +50,7 @@ test('an unchanged publication does not hide a runtime rollback or incomplete ro
 
 test('a published candidate is eligible only after its exact main workflow succeeds', () => {
   const revision = 'a'.repeat(40);
-  const publication = { component: 'frontend', repository: 'thedamfr/gthdf-frontend', runId: 123, runAttempt: 1, revision };
+  const publication = { component: 'frontend', repository: 'thedamfr/gthf-frontend', runId: 123, runAttempt: 1, revision };
   const run = { id: 123, run_attempt: 1, head_sha: revision, head_branch: 'main', event: 'push', path: '.github/workflows/delivery.yml', status: 'completed', conclusion: 'success', repository: { full_name: publication.repository } };
 
   assert.doesNotThrow(() => requirePublication(publication, run, 'frontend'));
@@ -59,7 +59,7 @@ test('a published candidate is eligible only after its exact main workflow succe
 
 test('local reconciliation compares the cumulative change with verified production', () => {
   const fingerprints = { runtime: 'b'.repeat(64), infrastructure: 'c'.repeat(64), postgres: 'd'.repeat(64) };
-  const value = { image: `ghcr.io/thedamfr/gthdf-frontend@sha256:${'1'.repeat(64)}`, revision: 'a'.repeat(40), processedRevision: 'a'.repeat(40), fingerprints };
+  const value = { image: `ghcr.io/thedamfr/gthf-frontend@sha256:${'1'.repeat(64)}`, revision: 'a'.repeat(40), processedRevision: 'a'.repeat(40), fingerprints };
   const candidate = { owner: 'github-frontend-123', publication: { component: 'frontend', runId: 123, revision: value.processedRevision }, plan: { build: false, infrastructure: false, postgres: false }, components: { frontend: value } };
   const production = { components: { frontend: { ...value, image: 'old', fingerprints: { ...fingerprints, runtime: 'old' } } } };
 
@@ -94,11 +94,11 @@ test('only a fast-forward candidate pointer is published after checking main aga
   const github = async (path: string, options: { method?: string; body?: unknown } = {}) => {
     requests.push({ path, ...options });
     if (path === 'git/ref/heads/main') return { object: { sha: revision } };
-    if (path === 'git/ref/heads/gthdf-release') return { object: { sha: 'previous' } };
+    if (path === 'git/ref/heads/gthf-release') return { object: { sha: 'previous' } };
     return { sha: path === 'git/trees' ? 'tree' : 'commit' };
   };
 
   assert.equal(await publishCandidate(github, { publication: { revision } }), true);
-  assert.deepEqual(requests.at(-1), { path: 'git/refs/heads/gthdf-release', method: 'PATCH', body: { sha: 'commit', force: false } });
+  assert.deepEqual(requests.at(-1), { path: 'git/refs/heads/gthf-release', method: 'PATCH', body: { sha: 'commit', force: false } });
   assert.deepEqual(requests.at(-2), { path: 'git/ref/heads/main' });
 });

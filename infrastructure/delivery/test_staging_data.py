@@ -20,4 +20,4 @@ class ArchiveTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     with staging_data.staged_archive(pathlib.Path('/private/editorial-test.dump')):
                         raise RuntimeError('restore failure')
-            self.assertEqual(calls[-1], ('staging', 'exec', 'gthdf-postgres-0', '--', 'rm', '-f', '/tmp/editorial-test.dump'))
+            self.assertEqual(calls[-1], ('staging', 'exec', 'gthf-postgres-0', '--', 'rm', '-f', '/tmp/editorial-test.dump'))

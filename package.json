@@ -1,5 +1,5 @@
 {
-  "name": "gthdf-frontend",
+  "name": "gthf-frontend",
   "version": "0.1.0",
   "private": true,
   "engines": {
@@ -32,7 +32,8 @@
     "infra:credentials:upload": "node infrastructure/scripts/upload-gthf-credentials.mjs",
     "infra:staging:storage": ".tmp/ansible/bin/ansible-playbook -i infrastructure/ansible/inventories/ovh/hosts.yml infrastructure/ansible/playbooks/configure-staging-storage.yml",
     "infra:staging:data": ".tmp/ansible/bin/ansible-playbook -i infrastructure/ansible/inventories/ovh/hosts.yml infrastructure/ansible/playbooks/prepare-staging-data.yml",
-    "infra:staging:media": ".tmp/ansible/bin/ansible-playbook -i infrastructure/ansible/inventories/ovh/hosts.yml infrastructure/ansible/playbooks/prepare-staging-media.yml"
+    "infra:staging:media": ".tmp/ansible/bin/ansible-playbook -i infrastructure/ansible/inventories/ovh/hosts.yml infrastructure/ansible/playbooks/prepare-staging-media.yml",
+    "test:e2e": "node infrastructure/delivery/recipe.mjs"
   },
   "dependencies": {
     "fast-xml-parser": "^5.10.1",

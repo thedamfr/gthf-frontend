@@ -4,34 +4,34 @@
   gather_facts: false
   become: false
   vars:
-    gthdf_operator_dir: /home/ubuntu/gthdf-delivery/operator-tools
+    gthf_operator_dir: /home/ubuntu/gthf-delivery/operator-tools
   tasks:
     - name: Require the explicit CMS checkout
       ansible.builtin.assert:
-        that: gthdf_cms_checkout is defined
+        that: gthf_cms_checkout is defined
 
     - name: Check the server identity
       ansible.builtin.command: hostname
       changed_when: false
-      register: gthdf_hostname
-      failed_when: gthdf_hostname.stdout != 'game-prod-ovh-gra'
+      register: gthf_hostname
+      failed_when: gthf_hostname.stdout != 'game-prod-ovh-gra'
 
     - name: Install the reviewed preparation scripts
       ansible.builtin.copy:
         src: "{{ item.source }}"
-        dest: "{{ gthdf_operator_dir }}/{{ item.name }}"
+        dest: "{{ gthf_operator_dir }}/{{ item.name }}"
         mode: '0600'
       loop:
         - {source: ../../delivery/release.py, name: release.py}
         - {source: ../../delivery/prepare-staging-media.py, name: prepare-staging-media.py}
-        - {source: "{{ gthdf_cms_checkout }}/scripts/prepare-delivery-staging.mjs", name: prepare-delivery-staging.mjs}
+        - {source: "{{ gthf_cms_checkout }}/scripts/prepare-delivery-staging.mjs", name: prepare-delivery-staging.mjs}
 
     - name: Run preparation in the isolated namespace
       ansible.builtin.command:
-        argv: [python3, "{{ gthdf_operator_dir }}/prepare-staging-media.py"]
-      register: gthdf_media
-      changed_when: "'already prepared' not in gthdf_media.stdout"
+        argv: [python3, "{{ gthf_operator_dir }}/prepare-staging-media.py"]
+      register: gthf_media
+      changed_when: "'already prepared' not in gthf_media.stdout"
 
     - name: Show the non-secret preparation proof
       ansible.builtin.debug:
-        msg: "{{ gthdf_media.stdout | from_json }}"
+        msg: "{{ gthf_media.stdout | from_json }}"

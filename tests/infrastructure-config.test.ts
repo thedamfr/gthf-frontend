@@ -50,7 +50,7 @@ test('the staging Kubernetes overlay is isolated and uses external object storag
     'infrastructure/kubernetes/overlays/staging/secrets.example.env',
   );
 
-  assert.match(namespace, /name: gthdf-staging/);
+  assert.match(namespace, /name: gthf-staging/);
   assert.match(overlay, /staging\.gthf\.fr/);
   assert.match(ingress, /staging-cms\.gthf\.fr/);
   assert.match(overlay, /XDG_CONFIG_HOME=\/app\/\.cache/);
@@ -73,7 +73,7 @@ test('the staging Kubernetes overlay is isolated and uses external object storag
   assert.doesNotMatch(certificate, /ClusterIssuer/);
   assert.match(postgres, /storage: 2Gi/);
   assert.match(frontend, /name: PORT\n\s+value: "3000"/);
-  assert.match(postgres, /image: gthdf-postgres:staging/);
+  assert.match(postgres, /image: gthf-postgres:staging/);
   assert.match(postgresDockerfile, /postgis\/postgis:17-3\.6-alpine@sha256:/);
   assert.match(postgresDockerfile, /8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c/);
   assert.match(policies, /name: default-deny/);
@@ -102,9 +102,9 @@ test('the promoted workload serves production hosts without the staging noindex 
   assert.match(overlay, /newTag: production/);
   assert.match(ingress, /host: gthf\.fr/);
   assert.match(ingress, /host: cms\.gthf\.fr/);
-  assert.match(ingress, /secretName: gthdf-production-tls/g);
+  assert.match(ingress, /secretName: gthf-production-tls/g);
   assert.doesNotMatch(ingress, /staging-noindex/);
-  assert.match(certificate, /secretName: gthdf-production-tls/);
+  assert.match(certificate, /secretName: gthf-production-tls/);
   assert.match(certificate, /- gthf\.fr/);
   assert.match(certificate, /- cms\.gthf\.fr/);
 });
@@ -112,7 +112,7 @@ test('the promoted workload serves production hosts without the staging noindex 
 test('the Ansible staging audit cannot mutate the host', () => {
   const audit = read('infrastructure/ansible/playbooks/audit.yml');
 
-  assert.match(audit, /hosts: gthdf_staging/);
+  assert.match(audit, /hosts: gthf_staging/);
   assert.match(audit, /become: false/);
   assert.doesNotMatch(
     audit,
@@ -131,19 +131,19 @@ test('the OVH inventory targets only the verified production host', () => {
   assert.doesNotMatch(inventory, /\bqg\b/);
 });
 
-test('the Ansible deployment is confined to the GTHDF staging namespace', () => {
+test('the Ansible deployment is confined to the GTHF staging namespace', () => {
   const deploy = read('infrastructure/ansible/playbooks/deploy.yml');
 
-  assert.match(deploy, /gthdf_namespace: gthdf-staging/);
+  assert.match(deploy, /gthf_namespace: gthf-staging/);
   assert.match(deploy, /kubectl, apply, -k/);
   assert.match(deploy, /kubectl, rollout, status/);
-  assert.match(deploy, /gthdf_wait_for_frontend: true/);
-  assert.match(deploy, /when: gthdf_wait_for_frontend \| bool/);
-  assert.match(deploy, /Restart GTHDF runtimes when their configuration changes/);
-  assert.match(deploy, /gthdf_secret_apply is changed/);
-  assert.match(deploy, /gthdf_overlay_apply is changed/);
+  assert.match(deploy, /gthf_wait_for_frontend: true/);
+  assert.match(deploy, /when: gthf_wait_for_frontend \| bool/);
+  assert.match(deploy, /Restart GTHF runtimes when their configuration changes/);
+  assert.match(deploy, /gthf_secret_apply is changed/);
+  assert.match(deploy, /gthf_overlay_apply is changed/);
   assert.match(deploy, /no_log: true/);
-  assert.match(deploy, /'podcast-studio' not in gthdf_rendered_overlay\.stdout/);
+  assert.match(deploy, /'podcast-studio' not in gthf_rendered_overlay\.stdout/);
   assert.doesNotMatch(
     deploy,
     /ansible\.builtin\.(apt|hostname|service|user):/,
@@ -180,7 +180,7 @@ test('OVH observability stays read-only and is reproducible', () => {
   assert.match(launcher, /--readonly/);
   assert.match(launcher, /--all-namespaces/);
   assert.match(launcher, /127\.0\.0\.1:16443/);
-  assert.match(launcher, /gthdf-ovh-readonly\.yaml/);
+  assert.match(launcher, /gthf-ovh-readonly\.yaml/);
 });
 
 test('the Clever migration helpers keep secrets out of build arguments and logs', () => {
@@ -205,7 +205,7 @@ test('the Clever migration helpers keep secrets out of build arguments and logs'
   assert.match(build, /--secret/);
   assert.match(build, /https:\/\/cms\.gthf\.fr/);
   assert.match(build, /https:\/\/gthf\.fr/);
-  assert.match(build, /gthdf-frontend:\$\{targetName\}/);
+  assert.match(build, /gthf-frontend:\$\{targetName\}/);
   assert.match(build, /finally/);
   assert.doesNotMatch(build, /ARG STRAPI_API_TOKEN/);
   assert.match(dump, /--format=custom/);

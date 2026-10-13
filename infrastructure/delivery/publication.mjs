@@ -13,7 +13,7 @@ export async function readBoundedJson(response, limit = 262144) {
 export function requirePublication(publication, run, component) {
   if (!['frontend', 'cms'].includes(component)
       || publication?.component !== component
-      || publication.repository !== `thedamfr/gthdf-${component}`
+      || publication.repository !== `thedamfr/gthf-${component}`
       || !Number.isSafeInteger(publication.runId) || publication.runId < 1
       || !Number.isSafeInteger(publication.runAttempt) || publication.runAttempt < 1
       || !/^[a-f0-9]{40}$/.test(publication.revision ?? '')
@@ -36,7 +36,7 @@ export function validatedBaseline(published, workflow, component) {
 export async function publishCandidate(github, candidate) {
   const current = await github('git/ref/heads/main');
   if (current.object.sha !== candidate.publication.revision) return false;
-  const branch = await github('git/ref/heads/gthdf-release', { allowMissing: true });
+  const branch = await github('git/ref/heads/gthf-release', { allowMissing: true });
   const tree = await github('git/trees', {
     method: 'POST', body: { tree: [{ path: 'candidate.json', mode: '100644', type: 'blob', content: JSON.stringify(candidate, null, 2) + '\n' }] },
   });
@@ -46,9 +46,9 @@ export async function publishCandidate(github, candidate) {
   // Check again after preparing the immutable objects, before moving the public pointer.
   if ((await github('git/ref/heads/main')).object.sha !== candidate.publication.revision) return false;
   if (branch) {
-    await github('git/refs/heads/gthdf-release', { method: 'PATCH', body: { sha: commit.sha, force: false } });
+    await github('git/refs/heads/gthf-release', { method: 'PATCH', body: { sha: commit.sha, force: false } });
   } else {
-    await github('git/refs', { method: 'POST', body: { ref: 'refs/heads/gthdf-release', sha: commit.sha } });
+    await github('git/refs', { method: 'POST', body: { ref: 'refs/heads/gthf-release', sha: commit.sha } });
   }
   return true;
 }

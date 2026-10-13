@@ -82,21 +82,21 @@ class DeliveryTests(unittest.TestCase):
 
     def test_staging_routes_reject_historical_and_unauthenticated_backends(self):
         def ingress(namespace, service, host='staging.gthf.fr'):
-            return {'metadata': {'namespace': namespace, 'annotations': {'traefik.ingress.kubernetes.io/router.middlewares': 'gthdf-qualification-https-redirect@kubernetescrd'}}, 'spec': {'tls': [{'hosts': [host], 'secretName': 'qualification-tls'}], 'rules': [
+            return {'metadata': {'namespace': namespace, 'annotations': {'traefik.ingress.kubernetes.io/router.middlewares': 'gthf-qualification-https-redirect@kubernetescrd'}}, 'spec': {'tls': [{'hosts': [host], 'secretName': 'qualification-tls'}], 'rules': [
                 {'host': host, 'http': {'paths': [{'backend': {'service': {'name': service, 'port': {'name': 'http'}}}}]}}
             ]}}
-        gateway = ingress('gthdf-qualification', 'gthdf-staging-gateway')
-        cms_gateway = ingress('gthdf-qualification', 'gthdf-staging-gateway', 'staging-cms.gthf.fr')
-        production = ingress('gthdf-staging', 'gthdf-frontend', 'gthf.fr')
+        gateway = ingress('gthf-qualification', 'gthf-staging-gateway')
+        cms_gateway = ingress('gthf-qualification', 'gthf-staging-gateway', 'staging-cms.gthf.fr')
+        production = ingress('gthf-staging', 'gthf-frontend', 'gthf.fr')
         release.require_isolated_staging_routes([gateway, cms_gateway, production])
         for insecure in [
             {**gateway, 'spec': {**gateway['spec'], 'tls': []}},
             {**gateway, 'spec': {**gateway['spec'], 'tls': [{'hosts': ['other.gthf.fr'], 'secretName': 'qualification-tls'}]}},
-            {**gateway, 'metadata': {'namespace': 'gthdf-qualification'}},
+            {**gateway, 'metadata': {'namespace': 'gthf-qualification'}},
         ]:
             with self.assertRaises(RuntimeError):
                 release.require_isolated_staging_routes([insecure, cms_gateway])
-        for conflict in [ingress('gthdf-staging', 'gthdf-frontend'), ingress('gthdf-qualification', 'gthdf-cms', 'staging-cms.gthf.fr')]:
+        for conflict in [ingress('gthf-staging', 'gthf-frontend'), ingress('gthf-qualification', 'gthf-cms', 'staging-cms.gthf.fr')]:
             with self.assertRaises(RuntimeError):
                 release.require_isolated_staging_routes([gateway, cms_gateway, conflict])
         for incomplete in [[], [gateway], [cms_gateway]]:
@@ -173,7 +173,7 @@ class DeliveryTests(unittest.TestCase):
                     raise RuntimeError('wrong public revision')
 
         def kube(environment, *args, **kwargs):
-            self.assertEqual(args[:3], ('patch', 'deployment', 'gthdf-frontend'))
+            self.assertEqual(args[:3], ('patch', 'deployment', 'gthf-frontend'))
             self.assertIn('previous-spec', args[-1])
             calls.append(('restore', 'previous'))
 
@@ -198,7 +198,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(saved[0][1]['rollback'], 'verified')
 
     def test_mutable_images_or_foreign_repositories_are_rejected(self):
-        for image in ['ghcr.io/thedamfr/gthdf-cms:latest', 'ghcr.io/other/cms@sha256:' + 'a' * 64]:
+        for image in ['ghcr.io/thedamfr/gthf-cms:latest', 'ghcr.io/other/cms@sha256:' + 'a' * 64]:
             with self.assertRaises(ValueError):
                 release.validate_component('cms', {'image': image, 'revision': 'a' * 40})
 

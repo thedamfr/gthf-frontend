@@ -17,8 +17,8 @@ test('staging sessions cannot be forged, reused with another key, or kept after 
 });
 
 test('the staging proxy never forwards an unknown or production hostname', () => {
-  assert.equal(upstreamForHost('staging.gthf.fr'), 'http://gthdf-frontend:3000');
-  assert.equal(upstreamForHost('staging-cms.gthf.fr'), 'http://gthdf-cms:1337');
+  assert.equal(upstreamForHost('staging.gthf.fr'), 'http://gthf-frontend:3000');
+  assert.equal(upstreamForHost('staging-cms.gthf.fr'), 'http://gthf-cms:1337');
   assert.throws(() => upstreamForHost('gthf.fr'));
   assert.throws(() => upstreamForHost('attacker.example'));
 });

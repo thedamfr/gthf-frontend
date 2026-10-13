@@ -1,11 +1,42 @@
+# Frontend GTHF
+
+## Summary (30 secondes)
+
+Le frontend public GTHF utilise Next.js et le CMS Strapi voisin `gthf-cms`.
+Les sources, dépôts et ressources Kubernetes adoptent le nom GTHF ; les
+identités PostgreSQL et les buckets existants sont conservés. Le
+[plan de renommage](documentation/renommage-gthf.md) précise les invariants,
+les Golden Journeys et les preuves à rattacher à la révision candidate.
+
+## Synthèse (3 minutes)
+
+Le développement utilise Node 22.12 à 24 et les dépendances verrouillées npm.
+Les contrôles locaux sont `npm test`, `npm run lint`, `npm run test:delivery`,
+`npm run build`, puis `npm run test:delivery:runtime`. Ce dernier utilise
+un CMS simulé ; il ne prouve pas une livraison Kubernetes.
+
+La commande `npm run test:e2e -- staging` vérifie les Golden Journeys sur
+l'environnement isolé : droits, contenu public et GPX, persistance d'un
+brouillon, preview, publication, upload et nettoyage. La commande
+`npm run test:e2e -- production` vérifie les parcours publics sans écriture.
+Elles utilisent les accès existants de Penthouse, gardés hors Git.
+
+Le nom du namespace de production reste `gthf-staging` pour cette migration.
+L'activation opérationnelle doit conserver les données et l'isolation du staging,
+et qualifier les digests des images reconstruites pour le renommage.
+Un renommage du code ne prouve pas que la migration a été exécutée. Les annexes ci-dessous décrivent
+l'architecture, le développement et les procédures antérieures.
+
+## Annexes
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Architecture GTHF et documentation transverse
 
 Le produit GTHF est réparti entre deux dépôts :
 
-- `gthdf-frontend` : application publique Next.js ;
-- [`gthdf-cms`](https://github.com/thedamfr/gthdf-cms) : CMS Strapi et
+- `gthf-frontend` : application publique Next.js ;
+- [`gthf-cms`](https://github.com/thedamfr/gthf-cms) : CMS Strapi et
   schémas éditoriaux.
 
 Le schéma exécutable appartient au CMS ; son contrat public est consommé par
@@ -28,7 +59,7 @@ manifeste sont décrits dans
 Les PR de livraison sont fusionnées et les premières images GHCR sont vérifiées
 en staging isolé et en production. Le [runbook](documentation/deploiement_continu.md)
 conserve leurs digests, recettes et l’incident suivi d’une reprise. La livraison automatique passe par un réconciliateur local sur Penthouse ;
-GitHub Actions publie les candidats sans connexion au serveur. Le namespace `gthdf-staging`
+GitHub Actions publie les candidats sans connexion au serveur. Le namespace `gthf-staging`
 et le bucket `gthdf-staging-media` désignent la production malgré leur nom.
 La recette utilise [le frontend staging](https://staging.gthf.fr/) et
 [le CMS staging](https://staging-cms.gthf.fr/), protégés par authentification.
@@ -115,7 +146,7 @@ conserver le cookie de preview.
 
 ## Validation PRD 02 et revue sur téléphone
 
-Avec Strapi démarré par `npm run develop` dans `gthdf-cms` et le frontend
+Avec Strapi démarré par `npm run develop` dans `gthf-cms` et le frontend
 démarré par `npm run dev` dans ce dossier, lancer depuis le frontend :
 
 ```bash
@@ -237,7 +268,7 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 ## Déploiement
 
 La production est hébergée sur le serveur OVH Gravelines, dans le namespace
-MicroK8s `gthdf-staging` validé avant la bascule DNS. Clever Cloud reste
+MicroK8s `gthf-staging` validé avant la bascule DNS. Clever Cloud reste
 provisoirement disponible comme voie de retour arrière ; ne pas supprimer ses
 applications, sa base ou son bucket tant que les sauvegardes OVH et la période
 d'observation post-bascule ne sont pas validées.

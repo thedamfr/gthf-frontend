@@ -35,7 +35,7 @@ export function localCandidate(candidate, production, processedInputs, imageInpu
       || Object.keys(candidate.components).length !== 1
       || candidate.owner !== `github-${component}-${candidate.publication.runId}`
       || candidate.publication.revision !== value.processedRevision
-      || !new RegExp(`^ghcr.io/thedamfr/gthdf-${component}@sha256:[a-f0-9]{64}$`).test(value.image ?? '')
+      || !new RegExp(`^ghcr.io/thedamfr/gthf-${component}@sha256:[a-f0-9]{64}$`).test(value.image ?? '')
       || !/^[a-f0-9]{40}$/.test(value.revision ?? '')
       || !/^[a-f0-9]{40}$/.test(value.processedRevision ?? '')
       || !['runtime', 'infrastructure', 'postgres'].every(key => /^[a-f0-9]{64}$/.test(processedInputs[key] ?? '') && processedInputs[key] === value.fingerprints?.[key])

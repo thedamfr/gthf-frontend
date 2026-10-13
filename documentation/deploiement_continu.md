@@ -1,5 +1,37 @@
 # Livraison continue GTHF sur OVH
 
+## Summary (30 secondes)
+
+Le déployeur courant cible les dépôts et ressources GTHF, la branche de
+publication `gthf-release`, le répertoire `/home/ubuntu/gthf-delivery` et
+l'unité `gthf-delivery.timer`. Le [plan de renommage](renommage-gthf.md)
+porte les conditions de migration ; les résultats datés ci-dessous restent
+les preuves des livraisons antérieures.
+
+## Synthèse (3 minutes)
+
+GitHub Actions vérifie le code et publie une image immuable ; le réconciliateur
+local contrôle son origine, qualifie le staging, puis réalise la promotion.
+Pour la migration de noms, suspendre ce circuit, vérifier le diff de la base
+contre la version servie et qualifier les nouvelles images GTHF. Ce diff est
+uniquement documentaire avant le renommage ; aucune autre fonctionnalité de
+`main` n'est incluse dans cette migration.
+
+Les namespaces cibles sont `gthf-qualification` et `gthf-staging` (production).
+Les données SQL, médias, identités et secrets existants restent distincts entre
+les environnements. Le proxy de staging doit utiliser les nouveaux services,
+et les sondes Prometheus les nouveaux labels applicatifs.
+
+Les Golden Journeys s'exécutent via `npm run test:e2e -- staging` (droits,
+CRUD, persistance, preview, publication, médias et nettoyage) et
+`npm run test:e2e -- production` (lecture publique et refus de preview anonyme).
+Le rapport de PR doit identifier la révision source, les digests réellement
+servis, les limites de qualification, les résultats et les artefacts privés.
+Les annexes conservent les noms et chemins historiques : les commandes anciennes
+ne remplacent pas le plan de migration courant.
+
+## Annexes — historique et procédures antérieurs au renommage
+
 Version 0.5 — 11 septembre 2026. Statut : **réconciliation locale activée ;
 cycles automatiques frontend et CMS vérifiés**. Le constat initial est conservé dans son
 [snapshot intégral](history/deploiement_continu_2026-09-10.md) ; les décisions nouvelles sont précisées dans

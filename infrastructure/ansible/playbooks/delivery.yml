@@ -4,44 +4,44 @@
   gather_facts: false
   become: false
   vars:
-    gthdf_state_dir: /home/ubuntu/gthdf-delivery
-    gthdf_release_dir: "{{ gthdf_state_dir }}/deployers/{{ gthdf_deployer_revision }}/{{ gthdf_candidate_id }}"
+    gthf_state_dir: /home/ubuntu/gthf-delivery
+    gthf_release_dir: "{{ gthf_state_dir }}/deployers/{{ gthf_deployer_revision }}/{{ gthf_candidate_id }}"
   tasks:
     - name: Require an exact deployer revision
       ansible.builtin.assert:
         that:
-          - gthdf_deployer_revision is match('^[a-f0-9]{40}$')
-          - gthdf_candidate_id is match('^github-(frontend|cms)-[0-9]+$')
+          - gthf_deployer_revision is match('^[a-f0-9]{40}$')
+          - gthf_candidate_id is match('^github-(frontend|cms)-[0-9]+$')
 
     - name: Verify the server identity before copying anything
       ansible.builtin.command: hostname
       changed_when: false
-      register: gthdf_hostname
-      failed_when: gthdf_hostname.stdout != 'game-prod-ovh-gra'
+      register: gthf_hostname
+      failed_when: gthf_hostname.stdout != 'game-prod-ovh-gra'
 
     - name: Prepare the private immutable deployer directory
       ansible.builtin.file:
-        path: "{{ gthdf_release_dir }}"
+        path: "{{ gthf_release_dir }}"
         state: directory
         mode: '0700'
 
     - name: Install the exact tracked deployer sources
       ansible.builtin.unarchive:
-        src: "{{ gthdf_deployer_archive }}"
-        dest: "{{ gthdf_release_dir }}"
+        src: "{{ gthf_deployer_archive }}"
+        dest: "{{ gthf_release_dir }}"
 
     - name: Install the non-secret candidate manifest
       ansible.builtin.copy:
-        src: "{{ gthdf_candidate_file }}"
-        dest: "{{ gthdf_release_dir }}/candidate.json"
+        src: "{{ gthf_candidate_file }}"
+        dest: "{{ gthf_release_dir }}/candidate.json"
         mode: '0600'
 
     - name: Qualify staging then promote under environment locks
       ansible.builtin.command:
         argv:
           - /home/ubuntu/.cache/infra-sincere/ansible-2.21.4/bin/python
-          - "{{ gthdf_release_dir }}/infrastructure/delivery/release.py"
+          - "{{ gthf_release_dir }}/infrastructure/delivery/release.py"
           - deliver
           - --candidate
-          - "{{ gthdf_release_dir }}/candidate.json"
+          - "{{ gthf_release_dir }}/candidate.json"
       changed_when: true

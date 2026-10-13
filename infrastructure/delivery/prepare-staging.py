@@ -9,10 +9,10 @@ import stat
 import socket
 import subprocess
 
-namespace = 'gthdf-qualification'
-state = pathlib.Path('/home/ubuntu/gthdf-delivery')
+namespace = 'gthf-qualification'
+state = pathlib.Path('/home/ubuntu/gthf-delivery')
 namespace_labels = {
-    'app.kubernetes.io/name': 'gthdf', 'gthdf.fr/environment': 'staging',
+    'app.kubernetes.io/name': 'gthf', 'gthf.fr/environment': 'staging',
     'pod-security.kubernetes.io/audit': 'restricted',
     'pod-security.kubernetes.io/enforce': 'restricted',
     'pod-security.kubernetes.io/warn': 'restricted',
@@ -63,10 +63,10 @@ def staging_configuration(source):
     shared_keys = ('NODE_ENV', 'XDG_CONFIG_HOME', 'STRAPI_TELEMETRY_DISABLED', 'HOST', 'PORT', 'PROXY_KOA', 'DATABASE_POOL_MIN', 'DATABASE_POOL_MAX')
     config = {key: source[key] for key in shared_keys if key in source}
     config.update({
-        'DATABASE_CLIENT': 'postgres', 'DATABASE_HOST': 'gthdf-postgres', 'DATABASE_PORT': '5432',
+        'DATABASE_CLIENT': 'postgres', 'DATABASE_HOST': 'gthf-postgres', 'DATABASE_PORT': '5432',
         'DATABASE_NAME': 'gthdf', 'DATABASE_USERNAME': 'gthdf', 'DATABASE_SSL': 'false',
         'PUBLIC_URL': 'https://staging-cms.gthf.fr', 'CLIENT_URL': 'https://staging.gthf.fr',
-        'PREVIEW_ALLOWED_ORIGINS': 'https://staging.gthf.fr', 'STRAPI_URL': 'http://gthdf-cms:1337',
+        'PREVIEW_ALLOWED_ORIGINS': 'https://staging.gthf.fr', 'STRAPI_URL': 'http://gthf-cms:1337',
         'PUBLIC_STRAPI_URL': 'https://staging-cms.gthf.fr', 'SITE_URL': 'https://staging.gthf.fr',
         'NEXT_PUBLIC_STRAPI_URL': 'https://staging-cms.gthf.fr', 'NEXT_PUBLIC_SITE_URL': 'https://staging.gthf.fr',
         'AWS_REGION': 'gra', 'AWS_ENDPOINT': 'https://s3.gra.io.cloud.ovh.net',
@@ -106,16 +106,16 @@ def main():
 
 
 def prepare():
-    source_volume = read('gthdf-staging', 'pvc', 'gthdf-postgres')
-    existing_volume = read_optional(namespace, 'pvc', 'gthdf-postgres')
+    source_volume = read('gthf-staging', 'pvc', 'gthf-postgres')
+    existing_volume = read_optional(namespace, 'pvc', 'gthf-postgres')
     staging_volume = existing_volume['spec'].get('volumeName') if existing_volume else None
     require_distinct_volumes(source_volume['spec'].get('volumeName'), staging_volume)
     checkpoint = state / 'staging-foundation.json'
     if checkpoint.exists():
-        require_secret_isolation(read(namespace, 'secret', 'gthdf-secrets')['data'], read('gthdf-staging', 'secret', 'gthdf-secrets')['data'])
-        kube('-n', namespace, 'rollout', 'status', 'statefulset/gthdf-postgres', '--timeout=60s')
+        require_secret_isolation(read(namespace, 'secret', 'gthf-secrets')['data'], read('gthf-staging', 'secret', 'gthf-secrets')['data'])
+        kube('-n', namespace, 'rollout', 'status', 'statefulset/gthf-postgres', '--timeout=60s')
         expected = json.loads(checkpoint.read_text())
-        if read(namespace, 'pvc', 'gthdf-postgres')['spec']['volumeName'] != expected['stagingVolume']:
+        if read(namespace, 'pvc', 'gthf-postgres')['spec']['volumeName'] != expected['stagingVolume']:
             raise RuntimeError('The staging volume has changed since the recorded preparation')
         current_labels = json.loads(kube('get', 'namespace', namespace, '-o', 'json'))['metadata'].get('labels', {})
         changed = any(current_labels.get(key) != value for key, value in namespace_labels.items())
@@ -124,41 +124,41 @@ def prepare():
         print(json.dumps({'namespace': namespace, 'status': 'namespace security aligned; database preserved' if changed else 'already prepared; no changes'}))
         raise SystemExit(0)
     # Require the source to be healthy before taking its non-secret resource definitions.
-    kube('-n', 'gthdf-staging', 'rollout', 'status', 'statefulset/gthdf-postgres', '--timeout=60s')
+    kube('-n', 'gthf-staging', 'rollout', 'status', 'statefulset/gthf-postgres', '--timeout=60s')
     apply({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace, 'labels': namespace_labels}})
-    existing = read_optional(namespace, 'secret', 'gthdf-secrets')
+    existing = read_optional(namespace, 'secret', 'gthf-secrets')
     if existing is not None:
-        if existing['metadata'].get('labels', {}).get('gthdf.fr/provisioner') != 'continuous-delivery':
+        if existing['metadata'].get('labels', {}).get('gthf.fr/provisioner') != 'continuous-delivery':
             raise RuntimeError('Existing staging credentials require inspection; refusing to replace them')
-        require_secret_isolation(existing['data'], read('gthdf-staging', 'secret', 'gthdf-secrets')['data'])
+        require_secret_isolation(existing['data'], read('gthf-staging', 'secret', 'gthf-secrets')['data'])
     else:
         values = {key: secrets.token_hex(48) for key in ['POSTGRES_PASSWORD', 'APP_KEYS', 'API_TOKEN_SALT', 'ADMIN_JWT_SECRET', 'TRANSFER_TOKEN_SALT', 'ENCRYPTION_KEY', 'JWT_SECRET', 'PREVIEW_SECRET', 'STRAPI_API_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']}
         values['APP_KEYS'] = ','.join(secrets.token_hex(32) for _ in range(4))
-        apply({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'gthdf-secrets', 'namespace': namespace, 'labels': {'gthdf.fr/provisioner': 'continuous-delivery'}}, 'type': 'Opaque', 'stringData': values})
-    for kind, name in [('serviceaccount', 'gthdf'), ('limitrange', 'gthdf-defaults'), ('networkpolicy', 'default-deny'), ('networkpolicy', 'allow-postgres-from-cms')]:
-        apply(transplant(read('gthdf-staging', kind, name)))
-    quota = transplant(read('gthdf-staging', 'resourcequota', 'gthdf-budget'))
+        apply({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'gthf-secrets', 'namespace': namespace, 'labels': {'gthf.fr/provisioner': 'continuous-delivery'}}, 'type': 'Opaque', 'stringData': values})
+    for kind, name in [('serviceaccount', 'gthf'), ('limitrange', 'gthf-defaults'), ('networkpolicy', 'default-deny'), ('networkpolicy', 'allow-postgres-from-cms')]:
+        apply(transplant(read('gthf-staging', kind, name)))
+    quota = transplant(read('gthf-staging', 'resourcequota', 'gthf-budget'))
     quota['spec']['hard'].update({'requests.cpu': '2', 'requests.memory': '3Gi', 'limits.cpu': '8', 'limits.memory': '8Gi'})
     apply(quota)
-    config = transplant(read('gthdf-staging', 'configmap', 'gthdf-config'))
+    config = transplant(read('gthf-staging', 'configmap', 'gthf-config'))
     config['data'] = staging_configuration(config['data'])
     apply(config)
     volume = transplant(source_volume)
     volume['spec'].pop('volumeName', None)
     apply(volume)
-    service = transplant(read('gthdf-staging', 'service', 'gthdf-postgres'))
+    service = transplant(read('gthf-staging', 'service', 'gthf-postgres'))
     for key in ['clusterIP', 'clusterIPs', 'ipFamilies', 'ipFamilyPolicy']:
         service['spec'].pop(key, None)
     apply(service)
-    postgres = transplant(read('gthdf-staging', 'statefulset', 'gthdf-postgres'))
-    source_pod = read('gthdf-staging', 'pod', 'gthdf-postgres-0')
-    source_image = 'docker.io/library/gthdf-postgres:staging'
+    postgres = transplant(read('gthf-staging', 'statefulset', 'gthf-postgres'))
+    source_pod = read('gthf-staging', 'pod', 'gthf-postgres-0')
+    source_image = 'docker.io/library/gthf-postgres:staging'
     image_rows = subprocess.check_output(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'images', 'ls'], text=True).splitlines()
     source_row = next((row.split() for row in image_rows if row.startswith(source_image + ' ')), None)
     if not source_row or not source_row[2].startswith('sha256:'):
         raise RuntimeError('The current PostgreSQL image cannot be resolved locally')
     manifest_digest = source_row[2]
-    image_id = 'docker.io/library/gthdf-postgres:qualified-' + manifest_digest.split(':')[1]
+    image_id = 'docker.io/library/gthf-postgres:qualified-' + manifest_digest.split(':')[1]
     existing_alias = next((row.split() for row in image_rows if row.startswith(image_id + ' ')), None)
     if existing_alias and existing_alias[2] != manifest_digest:
         raise RuntimeError('The immutable database alias already has a different digest')
@@ -167,12 +167,12 @@ def prepare():
     postgres['spec']['template']['spec']['containers'][0]['image'] = image_id
     postgres['spec']['template']['spec']['containers'][0]['imagePullPolicy'] = 'Never'
     apply(postgres)
-    kube('-n', namespace, 'rollout', 'status', 'statefulset/gthdf-postgres', '--timeout=300s')
-    source_volume = read('gthdf-staging', 'pvc', 'gthdf-postgres')
-    destination_volume = read(namespace, 'pvc', 'gthdf-postgres')
+    kube('-n', namespace, 'rollout', 'status', 'statefulset/gthf-postgres', '--timeout=300s')
+    source_volume = read('gthf-staging', 'pvc', 'gthf-postgres')
+    destination_volume = read(namespace, 'pvc', 'gthf-postgres')
     if source_volume['spec']['volumeName'] == destination_volume['spec']['volumeName']:
         raise RuntimeError('Database volumes are not isolated')
-    stage_pod = read(namespace, 'pod', 'gthdf-postgres-0')
+    stage_pod = read(namespace, 'pod', 'gthf-postgres-0')
     if stage_pod['status']['containerStatuses'][0]['imageID'] != source_pod['status']['containerStatuses'][0]['imageID']:
         raise RuntimeError('The staging database does not run the same PostgreSQL image')
     proof = {'namespace': namespace, 'postgresImage': image_id, 'postgresManifest': manifest_digest, 'productionVolume': source_volume['spec']['volumeName'], 'stagingVolume': destination_volume['spec']['volumeName'], 'status': 'empty database ready; public routing unchanged'}

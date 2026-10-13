@@ -4,36 +4,36 @@
   gather_facts: false
   become: false
   vars:
-    gthdf_state_dir: /home/ubuntu/gthdf-delivery
+    gthf_state_dir: /home/ubuntu/gthf-delivery
   tasks:
     - name: Verify the server identity
       ansible.builtin.command: hostname
       changed_when: false
-      register: gthdf_hostname
-      failed_when: gthdf_hostname.stdout != 'game-prod-ovh-gra'
+      register: gthf_hostname
+      failed_when: gthf_hostname.stdout != 'game-prod-ovh-gra'
 
     - name: Require a private existing delivery state directory
       ansible.builtin.stat:
-        path: "{{ gthdf_state_dir }}"
-      register: gthdf_state
+        path: "{{ gthf_state_dir }}"
+      register: gthf_state
 
     - name: Check ownership before installing an executor
       ansible.builtin.assert:
         that:
-          - gthdf_state.stat.isdir
-          - gthdf_state.stat.mode == '0700'
-          - gthdf_state.stat.pw_name == 'ubuntu'
+          - gthf_state.stat.isdir
+          - gthf_state.stat.mode == '0700'
+          - gthf_state.stat.pw_name == 'ubuntu'
 
     - name: Create the private agent source directory
       ansible.builtin.file:
-        path: "{{ gthdf_state_dir }}/agent/infrastructure/delivery"
+        path: "{{ gthf_state_dir }}/agent/infrastructure/delivery"
         state: directory
         mode: '0700'
 
     - name: Install the local polling entry point and its policy
       ansible.builtin.copy:
         src: "../../delivery/{{ item }}"
-        dest: "{{ gthdf_state_dir }}/agent/infrastructure/delivery/{{ item }}"
+        dest: "{{ gthf_state_dir }}/agent/infrastructure/delivery/{{ item }}"
         mode: '0600'
       loop:
         - reconcile.mjs
@@ -50,8 +50,8 @@
         dest: "/etc/systemd/system/{{ item }}"
         mode: '0644'
       loop:
-        - gthdf-delivery.service
-        - gthdf-delivery.timer
+        - gthf-delivery.service
+        - gthf-delivery.timer
 
     - name: Reload unit definitions without starting the service
       become: true
