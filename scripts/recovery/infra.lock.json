@@ -1,0 +1,6 @@
+{
+  "repository": "thedamfr/infra-sincere",
+  "revision": "9af2f6fbfb46b48f71e0e8065d603ca0821385fc",
+  "controller": "scripts/qualification/vm.py",
+  "status": "common-golden-journeys-passed-2026-10-13"
+}

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { requireIsolatedSecrets } from './secret-isolation.mjs';
 import { requireStagingConfiguration } from './configuration-isolation.mjs';
@@ -113,8 +114,8 @@ async function writeRecipe(credentials) {
   })).json();
   const adminToken = session.data?.token;
   assert.ok(adminToken);
-  const admin = async (path, method, body) => {
-    const response = await request(origins.cms, path, { method, headers: { Authorization: 'Bearer ' + adminToken, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  const admin = async (path, method, body, headers = {}) => {
+    const response = await request(origins.cms, path, { method, headers: { Authorization: 'Bearer ' + adminToken, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return response.status === 204 ? null : response.json();
   };
   const authors = await cms('/api/authors?pagination[pageSize]=1');
@@ -124,6 +125,8 @@ async function writeRecipe(credentials) {
   const model = '/content-manager/collection-types/api::article.article';
   let documentId;
   let uploaded;
+  const uploadKey = randomUUID();
+  const deleteKey = randomUUID();
   try {
     step = 'create and edit a draft';
     const article = await admin(model, 'POST', {
@@ -149,7 +152,7 @@ async function writeRecipe(credentials) {
     step = 'upload and read media';
     const form = new FormData();
     form.set('files', new Blob([uploadPng], { type: 'image/png' }), slug + '.png');
-    const upload = await (await request(origins.cms, '/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + adminToken }, body: form })).json();
+    const upload = await (await request(origins.cms, '/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + adminToken, 'Idempotency-Key': uploadKey }, body: form })).json();
     uploaded = upload[0];
     assert.ok(uploaded?.id && uploaded.url);
     const mediaUrl = recipeMediaUrl(uploaded.url, environment);
@@ -159,7 +162,7 @@ async function writeRecipe(credentials) {
   } finally {
     await cleanupRecipeData(
       async () => { if (documentId) await admin(model + '/' + documentId, 'DELETE'); },
-      async () => { if (uploaded?.id) await admin('/upload/files/' + uploaded.id, 'DELETE'); },
+      async () => { if (uploaded?.id) await admin('/upload/files/' + uploaded.id, 'DELETE', undefined, { 'Idempotency-Key': deleteKey }); },
     );
   }
 }
