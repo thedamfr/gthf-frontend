@@ -32,7 +32,7 @@ const child = spawn(process.execPath, ['server.js'], {
   cwd: standalone,
   env: {
     PATH: process.env.PATH, NODE_ENV: 'production', HOSTNAME: '127.0.0.1', PORT: String(port),
-    GTHDF_REVISION: revision, NEXT_TELEMETRY_DISABLED: '1',
+    GTHF_REVISION: revision, NEXT_TELEMETRY_DISABLED: '1',
     STRAPI_URL: 'http://127.0.0.1:' + cms.address().port,
     STRAPI_API_TOKEN: 'runtime-test-fixture',
     PUBLIC_STRAPI_URL: 'https://cms.runtime-test.invalid', SITE_URL: 'https://runtime-test.invalid',

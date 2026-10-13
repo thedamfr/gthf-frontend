@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
-const cookieName = 'gthdf_staging_session';
+const cookieName = 'gthf_staging_session';
 const lifetime = 12 * 60 * 60;
 const equal = (left, right) => {
   const a = Buffer.from(left); const b = Buffer.from(right);
@@ -21,8 +21,8 @@ export function verifySession(value, key, now = Math.floor(Date.now() / 1000)) {
 }
 
 export function upstreamForHost(host) {
-  if (host === 'staging.gthf.fr') return 'http://gthdf-frontend:3000';
-  if (host === 'staging-cms.gthf.fr') return 'http://gthdf-cms:1337';
+  if (host === 'staging.gthf.fr') return 'http://gthf-frontend:3000';
+  if (host === 'staging-cms.gthf.fr') return 'http://gthf-cms:1337';
   throw new Error('Unknown staging host');
 }
 

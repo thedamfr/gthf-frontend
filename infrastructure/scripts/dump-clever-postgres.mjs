@@ -3,16 +3,16 @@ import { once } from 'node:events';
 import { createWriteStream, rmSync, statSync } from 'node:fs';
 
 const clever = process.env.CLEVER_BIN ?? 'clever';
-const cmsApp = process.env.GTHDF_CMS_CLEVER_APP
+const cmsApp = process.env.GTHF_CMS_CLEVER_APP
   ?? 'app_67466113-4135-4892-b3f5-2a8d5a3623f2';
-const sshHost = process.env.GTHDF_DOCKER_SSH_HOST ?? 'qg-codex';
+const sshHost = process.env.GTHF_DOCKER_SSH_HOST ?? 'qg-codex';
 const timestamp = new Date().toISOString().replaceAll(/[-:.TZ]/g, '');
-const dumpPath = process.env.GTHDF_DUMP_PATH
-  ?? `/private/tmp/gthdf-clever-${timestamp}.dump`;
+const dumpPath = process.env.GTHF_DUMP_PATH
+  ?? `/private/tmp/gthf-clever-${timestamp}.dump`;
 const postgresImage = 'postgres:17.11-alpine3.24@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73';
 
-if (!/^\/private\/tmp\/gthdf-clever-[A-Za-z0-9._-]+\.dump$/.test(dumpPath)) {
-  throw new Error('GTHDF_DUMP_PATH must be a gthdf-clever-*.dump file under /private/tmp.');
+if (!/^\/private\/tmp\/gthf-clever-[A-Za-z0-9._-]+\.dump$/.test(dumpPath)) {
+  throw new Error('GTHF_DUMP_PATH must be a gthf-clever-*.dump file under /private/tmp.');
 }
 
 function environmentMap(value) {

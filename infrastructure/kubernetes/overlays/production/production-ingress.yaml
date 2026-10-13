@@ -1,12 +1,12 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: gthdf-production-frontend
+  name: gthf-production-frontend
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
     app.kubernetes.io/component: frontend
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: gthdf-staging-https-redirect@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: gthf-staging-https-redirect@kubernetescrd
 spec:
   ingressClassName: public
   rules:
@@ -17,23 +17,23 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: gthdf-frontend
+                name: gthf-frontend
                 port:
                   name: http
   tls:
     - hosts:
         - gthf.fr
-      secretName: gthdf-production-tls
+      secretName: gthf-production-tls
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: gthdf-production-cms
+  name: gthf-production-cms
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
     app.kubernetes.io/component: cms
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: gthdf-staging-https-redirect@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: gthf-staging-https-redirect@kubernetescrd
     nginx.ingress.kubernetes.io/proxy-body-size: 10m
 spec:
   ingressClassName: public
@@ -45,10 +45,10 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: gthdf-cms
+                name: gthf-cms
                 port:
                   name: http
   tls:
     - hosts:
         - cms.gthf.fr
-      secretName: gthdf-production-tls
+      secretName: gthf-production-tls

@@ -10,10 +10,10 @@ import { uploadPng } from './upload-fixture.mjs';
 const environment = process.argv[2];
 if (!['staging', 'production'].includes(environment)) throw new Error('A named environment is required');
 const staging = environment === 'staging';
-const namespace = staging ? 'gthdf-qualification' : 'gthdf-staging';
+const namespace = staging ? 'gthf-qualification' : 'gthf-staging';
 const origins = staging ? { cms: 'https://staging-cms.gthf.fr', frontend: 'https://staging.gthf.fr' } : { cms: 'https://cms.gthf.fr', frontend: 'https://gthf.fr' };
 const kube = (ns, ...args) => JSON.parse(execFileSync('sudo', ['-n', '/snap/bin/microk8s', 'kubectl', '-n', ns, ...args, '-o', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
-const secrets = kube(namespace, 'get', 'secret', 'gthdf-secrets').data;
+const secrets = kube(namespace, 'get', 'secret', 'gthf-secrets').data;
 const privateValue = (key) => Buffer.from(secrets[key], 'base64').toString();
 const apiToken = privateValue('STRAPI_API_TOKEN');
 const cookies = {};
@@ -24,7 +24,7 @@ async function request(origin, path, options = {}) {
   if (!staging && options.method && options.method !== 'GET') throw new Error('Production recipes are read-only');
   const response = await fetch(origin + path, {
     ...options,
-    headers: { 'User-Agent': 'gthdf-delivery', ...(cookies[origin] ? { Cookie: cookies[origin] } : {}), ...options.headers },
+    headers: { 'User-Agent': 'gthf-delivery', ...(cookies[origin] ? { Cookie: cookies[origin] } : {}), ...options.headers },
     redirect: options.redirect ?? 'error',
     signal: AbortSignal.timeout(30000),
   });
@@ -37,16 +37,16 @@ async function cms(path, options = {}) {
 }
 
 function requireIsolation() {
-  const productionConfig = kube('gthdf-staging', 'get', 'configmap', 'gthdf-config').data;
-  const stageConfig = kube(namespace, 'get', 'configmap', 'gthdf-config').data;
-  const productionSecrets = kube('gthdf-staging', 'get', 'secret', 'gthdf-secrets').data;
+  const productionConfig = kube('gthf-staging', 'get', 'configmap', 'gthf-config').data;
+  const stageConfig = kube(namespace, 'get', 'configmap', 'gthf-config').data;
+  const productionSecrets = kube('gthf-staging', 'get', 'secret', 'gthf-secrets').data;
   requireStagingConfiguration(stageConfig);
   assert.notEqual(stageConfig.AWS_BUCKET, productionConfig.AWS_BUCKET);
   requireIsolatedSecrets(secrets, productionSecrets);
-  const prodVolume = kube('gthdf-staging', 'get', 'pvc', 'gthdf-postgres');
-  const stageVolume = kube(namespace, 'get', 'pvc', 'gthdf-postgres');
+  const prodVolume = kube('gthf-staging', 'get', 'pvc', 'gthf-postgres');
+  const stageVolume = kube(namespace, 'get', 'pvc', 'gthf-postgres');
   assert.notEqual(prodVolume.spec.volumeName, stageVolume.spec.volumeName);
-  const workloads = kube(namespace, 'get', 'deployment', 'gthdf-cms', 'gthdf-frontend');
+  const workloads = kube(namespace, 'get', 'deployment', 'gthf-cms', 'gthf-frontend');
   for (const workload of workloads.items) {
     for (const container of workload.spec.template.spec.containers) {
       assert.ok(!(container.env ?? []).some((variable) => /^(DATABASE_URL|POSTGRESQL_ADDON_)/.test(variable.name)));
@@ -55,18 +55,28 @@ function requireIsolation() {
 }
 
 async function loginGateway(password) {
+  step = 'Golden Journey: gateway access denied, then authenticated recovery';
   for (const origin of Object.values(origins)) {
+    const anonymous = await request(origin, '/', { allowStatus: [401] });
+    assert.equal(anonymous.status, 401);
+    const invalid = await request(origin, '/_gateway/login', {
+      method: 'POST', body: new URLSearchParams({ password: 'invalid-golden-journey-password' }), allowStatus: [403],
+    });
+    assert.equal(invalid.status, 403);
     const response = await request(origin, '/_gateway/login', {
       method: 'POST', body: new URLSearchParams({ password }), redirect: 'manual', allowStatus: [303],
     });
-    const cookie = response.headers.getSetCookie().find((value) => value.startsWith('gthdf_staging_session='));
+    const cookie = response.headers.getSetCookie().find((value) => value.startsWith('gthf_staging_session='));
     assert.ok(cookie);
     cookies[origin] = cookie.split(';')[0];
   }
 }
 
 async function publicRecipe() {
-  step = 'published chapter and media';
+  step = 'Golden Journey: preview access denied without its secret';
+  const unauthorized = await request(origins.frontend, '/api/preview?url=/article/golden-journey-missing&status=draft', { allowStatus: [401] });
+  assert.equal(unauthorized.status, 401);
+  step = 'Golden Journey: published chapter and media';
   const chapters = await cms('/api/chapters?status=published&pagination[pageSize]=1&populate[gpxFileAB]=true&populate[thumbnail]=true');
   const chapter = chapters.data?.[0];
   assert.ok(chapter?.slug && chapter.title);
@@ -79,7 +89,7 @@ async function publicRecipe() {
   const mediaResponse = await fetch(mediaUrl, { headers: { Range: 'bytes=0-1023', ...(cookies[mediaUrl.origin] ? { Cookie: cookies[mediaUrl.origin] } : {}) }, redirect: 'error', signal: AbortSignal.timeout(20000) });
   assert.ok(mediaResponse.ok);
   assert.ok((await mediaResponse.arrayBuffer()).byteLength > 0);
-  step = 'public city and itinerary catalogue';
+  step = 'Golden Journey: public city, itinerary catalogue and GPX download';
   const city = (await cms('/api/cities?status=published&filters[hasPublicPage][$eq]=true&pagination[pageSize]=1')).data?.[0];
   assert.ok(city?.slug);
   assert.ok((await (await request(origins.frontend, '/villes/' + encodeURIComponent(city.slug))).text()).includes('<h1'));
@@ -93,7 +103,10 @@ async function publicRecipe() {
 }
 
 async function writeRecipe(credentials) {
-  step = 'administration login';
+  step = 'Golden Journey: administrative access requires authentication';
+  const unauthorized = await request(origins.cms, '/admin/users/me', { allowStatus: [401] });
+  assert.equal(unauthorized.status, 401);
+  step = 'Golden Journey: administration login';
   const session = await (await request(origins.cms, '/admin/login', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email: credentials.email, password: credentials.password }),
@@ -121,6 +134,8 @@ async function writeRecipe(credentials) {
     documentId = article.data?.documentId ?? article.documentId;
     assert.ok(documentId);
     await admin(model + '/' + documentId, 'PUT', { title: slug + ' modifié' });
+    const persisted = await admin(model + '/' + documentId + '?status=draft', 'GET');
+    assert.equal((persisted.data ?? persisted).title, slug + ' modifié');
     step = 'protected preview';
     const preview = await request(origins.frontend, '/api/preview?' + new URLSearchParams({ url: '/article/' + slug, status: 'draft', secret: privateValue('PREVIEW_SECRET') }), { redirect: 'manual', allowStatus: [307, 302] });
     const draftCookies = preview.headers.getSetCookie().map((cookie) => cookie.split(';')[0]).join('; ');
@@ -130,7 +145,7 @@ async function writeRecipe(credentials) {
     step = 'publish and read through Next.js';
     await admin(model + '/' + documentId + '/actions/publish', 'POST', {});
     const published = await request(origins.frontend, '/article/' + slug);
-    assert.ok((await published.text()).includes(slug));
+    assert.ok((await published.text()).includes(slug + ' modifié'));
     step = 'upload and read media';
     const form = new FormData();
     form.set('files', new Blob([uploadPng], { type: 'image/png' }), slug + '.png');
@@ -152,14 +167,14 @@ async function writeRecipe(credentials) {
 try {
   if (staging) {
     step = 'isolation'; requireIsolation();
-    const credentials = JSON.parse(readFileSync('/home/ubuntu/gthdf-delivery/staging-access.json', 'utf8'));
+    const credentials = JSON.parse(readFileSync('/home/ubuntu/gthf-delivery/staging-access.json', 'utf8'));
     await loginGateway(credentials.gatewayPassword);
     await publicRecipe();
     await writeRecipe(credentials);
   } else {
     await publicRecipe();
   }
-  console.log(JSON.stringify({ environment, status: 'passed', productionWrites: 0, checkedAt: new Date().toISOString() }));
+  console.log(JSON.stringify({ environment, status: 'passed', suite: 'Golden Journeys', scenarios: staging ? ['gateway permissions and recovery', 'public chapter and media', 'city and GPX catalogue', 'admin permissions', 'persisted draft edit', 'protected preview', 'publication', 'media upload and cleanup'] : ['public chapter and media', 'city and GPX catalogue', 'preview permissions'], productionWrites: 0, checkedAt: new Date().toISOString() }));
 } catch {
   console.error(`GTHF recipe failed during: ${step}`);
   process.exitCode = 1;

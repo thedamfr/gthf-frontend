@@ -1,11 +1,11 @@
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: gthdf-qualification-tls
+  name: gthf-qualification-tls
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
 spec:
-  secretName: gthdf-qualification-tls
+  secretName: gthf-qualification-tls
   issuerRef:
     kind: Issuer
     name: letsencrypt-production-http01

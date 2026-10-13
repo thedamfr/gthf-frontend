@@ -1,10 +1,10 @@
 ---
-- name: Audit a shared GTHDF target cluster without mutation
-  hosts: gthdf_staging
+- name: Audit a shared GTHF target cluster without mutation
+  hosts: gthf_staging
   become: false
   gather_facts: true
   vars:
-    gthdf_namespace: gthdf-staging
+    gthf_namespace: gthf-staging
     minimum_free_bytes: 6442450944
     required_ingress_class: public
     required_storage_class: microk8s-hostpath
@@ -15,7 +15,7 @@
           - ansible_facts.system == "Linux"
           - ansible_facts.distribution == "Ubuntu"
           - ansible_facts.architecture in ["x86_64", "amd64"]
-        fail_msg: GTHDF staging currently supports only Ubuntu on amd64.
+        fail_msg: GTHF staging currently supports only Ubuntu on amd64.
 
     - name: Select the root filesystem facts
       ansible.builtin.set_fact:
@@ -25,7 +25,7 @@
       ansible.builtin.assert:
         that:
           - root_mount.size_available | int >= minimum_free_bytes
-        fail_msg: The host needs at least 6 GiB free before a GTHDF staging build or rollout.
+        fail_msg: The host needs at least 6 GiB free before a GTHF staging build or rollout.
 
     - name: Collect MicroK8s status
       ansible.builtin.command:
@@ -55,19 +55,19 @@
         that:
           - "'certificates.cert-manager.io' in cert_manager_resources.stdout_lines"
           - "'issuers.cert-manager.io' in cert_manager_resources.stdout_lines"
-        fail_msg: The cert-manager APIs required by the namespaced GTHDF issuer are unavailable.
+        fail_msg: The cert-manager APIs required by the namespaced GTHF issuer are unavailable.
 
     - name: Read the required storage class
       ansible.builtin.command:
         argv: [microk8s, kubectl, get, storageclass, "{{ required_storage_class }}", -o, name]
       changed_when: false
 
-    - name: Inspect the isolated GTHDF namespace
+    - name: Inspect the isolated GTHF namespace
       ansible.builtin.command:
-        argv: [microk8s, kubectl, get, namespace, "{{ gthdf_namespace }}", -o, name]
+        argv: [microk8s, kubectl, get, namespace, "{{ gthf_namespace }}", -o, name]
       changed_when: false
       failed_when: false
-      register: gthdf_namespace_result
+      register: gthf_namespace_result
 
     - name: Show the non-secret staging readiness summary
       ansible.builtin.debug:
@@ -77,4 +77,4 @@
           root_free_bytes: "{{ root_mount.size_available }}"
           microk8s_running: "{{ 'running: True' in microk8s_status.stdout }}"
           node_count: "{{ (kubernetes_nodes.stdout | from_json)['items'] | length }}"
-          gthdf_namespace_present: "{{ gthdf_namespace_result.rc == 0 }}"
+          gthf_namespace_present: "{{ gthf_namespace_result.rc == 0 }}"

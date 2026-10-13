@@ -13,12 +13,12 @@ import urllib.request
 
 
 def require_monitoring(success, ages, alerts):
-    expected = {'gthdf-frontend', 'gthdf-cms'}
+    expected = {'gthf-frontend', 'gthf-cms'}
     if any(len(values) != 2 or {item['metric']['application'] for item in values} != expected for values in (success, ages)):
         raise RuntimeError('Missing production Prometheus probes')
     if any(float(item['value'][1]) != 1 for item in success) or any(not 0 <= float(item['value'][1]) <= 60 for item in ages):
         raise RuntimeError('Unhealthy or stale production Prometheus probes')
-    if any(item['metric'].get('severity') in ('warning', 'critical') and (item['metric'].get('namespace') in ('gthdf-staging', 'gthdf-qualification') or item['metric'].get('application') in expected or item['metric'].get('node') == 'game-prod-ovh-gra') for item in alerts):
+    if any(item['metric'].get('severity') in ('warning', 'critical') and (item['metric'].get('namespace') in ('gthf-staging', 'gthf-qualification') or item['metric'].get('application') in expected or item['metric'].get('node') == 'game-prod-ovh-gra') for item in alerts):
         raise RuntimeError('An active GTHF or host alert requires review')
 
 
@@ -27,7 +27,7 @@ def prometheus_proof():
     def query(expression):
         with urllib.request.urlopen('http://' + address + ':9090/api/v1/query?' + urllib.parse.urlencode({'query': expression}), timeout=15) as response:
             return json.load(response)['data']['result']
-    selector = 'probe_success{job="production-http",environment="production",application=~"gthdf-frontend|gthdf-cms"}'
+    selector = 'probe_success{job="production-http",environment="production",application=~"gthf-frontend|gthf-cms"}'
     success = query(selector)
     ages = query('time() - timestamp(' + selector + ')')
     alerts = query('ALERTS{alertstate="firing"}')
@@ -59,7 +59,7 @@ class OriginMonitor:
         status = None
         error_type = None
         try:
-            headers = {'User-Agent': 'gthdf-delivery', 'Cache-Control': 'no-cache'}
+            headers = {'User-Agent': 'gthf-delivery', 'Cache-Control': 'no-cache'}
             if kind == 'content':
                 headers['Authorization'] = 'Bearer ' + self.token
             connection.request('GET', path, headers=headers)

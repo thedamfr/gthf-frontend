@@ -1,4 +1,30 @@
-# Infrastructure GTHDF autohébergée
+# Infrastructure GTHF autohébergée
+
+## Summary (30 secondes)
+
+Les manifestes et outils courants utilisent `gthf-staging` pour la production
+et `gthf-qualification` pour le staging isolé. Le
+[plan de renommage](../documentation/renommage-gthf.md) documente la bascule,
+les données à conserver et les Golden Journeys. Les états datés en annexe
+restent des preuves historiques et ne décrivent pas automatiquement le cluster actuel.
+
+## Synthèse (3 minutes)
+
+Les composants Kubernetes, images, dépôts, labels et unités de livraison
+adoptent le préfixe `gthf`. Les données PostgreSQL restent sous l'identité
+`gthdf` ; les buckets médias et URLs Clever existants sont inchangés.
+Les sources du réconciliateur ciblent `/home/ubuntu/gthf-delivery` et
+`gthf-delivery.timer` ; l'état privé doit être migré avant leur activation.
+
+La migration opérationnelle conserve les volumes et qualifie les images reconstruites
+avec les seuls changements de noms, sur une base runtime identique à la production.
+Elle requiert une bascule contrôlée des routes et du proxy de staging,
+puis les commandes `npm run test:e2e -- staging` et
+`npm run test:e2e -- production`. Le diff de la base `main` vers la version
+servie a été vérifié : seuls des documents avaient changé avant ce renommage. Les anciennes procédures et noms ci-dessous
+sont conservés pour comprendre les preuves datées et le retour arrière.
+
+## Annexes — historique antérieur au renommage
 
 Ce dossier conserve l’historique de migration Hetzner puis OVH, ainsi que les
 ressources de livraison actuelles. Sur Penthouse, la production utilise

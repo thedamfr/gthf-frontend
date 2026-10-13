@@ -4,33 +4,33 @@
   gather_facts: false
   become: false
   vars:
-    gthdf_operator_dir: /home/ubuntu/gthdf-delivery/operator-tools
+    gthf_operator_dir: /home/ubuntu/gthf-delivery/operator-tools
   tasks:
     - name: Check the server before installing the preparation scripts
       ansible.builtin.command: hostname
       changed_when: false
-      register: gthdf_hostname
-      failed_when: gthdf_hostname.stdout != 'game-prod-ovh-gra'
+      register: gthf_hostname
+      failed_when: gthf_hostname.stdout != 'game-prod-ovh-gra'
 
     - name: Prepare the private operator directory
       ansible.builtin.file:
-        path: "{{ gthdf_operator_dir }}"
+        path: "{{ gthf_operator_dir }}"
         state: directory
         mode: '0700'
 
     - name: Install the data preparation scripts
       ansible.builtin.copy:
         src: "../../delivery/{{ item }}"
-        dest: "{{ gthdf_operator_dir }}/{{ item }}"
+        dest: "{{ gthf_operator_dir }}/{{ item }}"
         mode: '0600'
       loop: [release.py, staging-data.py]
 
     - name: Copy editorial data without production accounts or tokens
       ansible.builtin.command:
-        argv: "{{ ['python3', gthdf_operator_dir + '/staging-data.py'] + (['--resume-empty-schema'] if gthdf_resume_empty_schema | default(false) | bool else []) }}"
-      register: gthdf_data
-      changed_when: "'already populated' not in gthdf_data.stdout"
+        argv: "{{ ['python3', gthf_operator_dir + '/staging-data.py'] + (['--resume-empty-schema'] if gthf_resume_empty_schema | default(false) | bool else []) }}"
+      register: gthf_data
+      changed_when: "'already populated' not in gthf_data.stdout"
 
     - name: Show the non-secret data preparation proof
       ansible.builtin.debug:
-        msg: "{{ gthdf_data.stdout | from_json }}"
+        msg: "{{ gthf_data.stdout | from_json }}"

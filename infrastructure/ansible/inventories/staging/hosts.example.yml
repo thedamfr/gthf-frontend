@@ -1,6 +1,6 @@
 all:
   children:
-    gthdf_staging:
+    gthf_staging:
       hosts:
         studio-prod-01:
           ansible_host: qg

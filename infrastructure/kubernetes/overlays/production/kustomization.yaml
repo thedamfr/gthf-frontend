@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-namespace: gthdf-staging
+namespace: gthf-staging
 
 resources:
   - ../../base
@@ -12,18 +12,18 @@ resources:
   - middleware.yaml
 
 images:
-  - name: gthdf-postgres
-    newName: gthdf-postgres
+  - name: gthf-postgres
+    newName: gthf-postgres
     newTag: staging
-  - name: gthdf-cms
-    newName: gthdf-cms
+  - name: gthf-cms
+    newName: gthf-cms
     newTag: staging
-  - name: gthdf-frontend
-    newName: gthdf-frontend
+  - name: gthf-frontend
+    newName: gthf-frontend
     newTag: production
 
 configMapGenerator:
-  - name: gthdf-config
+  - name: gthf-config
     literals:
       - NODE_ENV=production
       - XDG_CONFIG_HOME=/app/.cache
@@ -35,7 +35,7 @@ configMapGenerator:
       - CLIENT_URL=https://gthf.fr
       - PREVIEW_ALLOWED_ORIGINS=https://gthf.fr
       - DATABASE_CLIENT=postgres
-      - DATABASE_HOST=gthdf-postgres
+      - DATABASE_HOST=gthf-postgres
       - DATABASE_PORT=5432
       - DATABASE_NAME=gthdf
       - DATABASE_USERNAME=gthdf
@@ -47,7 +47,7 @@ configMapGenerator:
       - AWS_BUCKET=gthdf-staging-media
       - AWS_CDN_URL=https://gthdf-staging-media.s3.eu-west-par.io.cloud.ovh.net
       - MEDIA_ALLOWED_ORIGINS=https://gthdf-staging-media.s3.eu-west-par.io.cloud.ovh.net
-      - STRAPI_URL=http://gthdf-cms:1337
+      - STRAPI_URL=http://gthf-cms:1337
       - PUBLIC_STRAPI_URL=https://cms.gthf.fr
       - SITE_URL=https://gthf.fr
       - STRAPI_MEDIA_ORIGINS=https://cellar-c2.services.clever-cloud.com,https://gthdf-staging-media.s3.eu-west-par.io.cloud.ovh.net
@@ -62,4 +62,4 @@ patches:
       - op: add
         path: /spec/template/spec/imagePullSecrets
         value:
-          - name: gthdf-ghcr
+          - name: gthf-ghcr

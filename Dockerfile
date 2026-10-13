@@ -12,15 +12,15 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --ignore-scripts
 
 COPY . .
-ARG GTHDF_REVISION=development
-ENV GTHDF_REVISION=${GTHDF_REVISION}
+ARG GTHF_REVISION=development
+ENV GTHF_REVISION=${GTHF_REVISION}
 RUN npm run build && test -f .next/standalone/server.js
 
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
-ARG GTHDF_REVISION=development
-ENV GTHDF_REVISION=${GTHDF_REVISION}
-LABEL org.opencontainers.image.revision=${GTHDF_REVISION}
+ARG GTHF_REVISION=development
+ENV GTHF_REVISION=${GTHF_REVISION}
+LABEL org.opencontainers.image.revision=${GTHF_REVISION}
 ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     NEXT_TELEMETRY_DISABLED=1 \

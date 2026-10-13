@@ -7,14 +7,14 @@ import { createConnection } from 'node:net';
 import process from 'node:process';
 
 const kubeconfig =
-  process.env.GTHDF_OVH_KUBECONFIG ??
-  `${homedir()}/.kube/gthdf-ovh-readonly.yaml`;
+  process.env.GTHF_OVH_KUBECONFIG ??
+  `${homedir()}/.kube/gthf-ovh-readonly.yaml`;
 const sshHost =
-  process.env.GTHDF_OVH_SSH_HOST ?? 'production@game-prod-ovh-gra';
-const localPort = Number(process.env.GTHDF_OVH_KUBE_PORT ?? '16443');
+  process.env.GTHF_OVH_SSH_HOST ?? 'production@game-prod-ovh-gra';
+const localPort = Number(process.env.GTHF_OVH_KUBE_PORT ?? '16443');
 
 if (!Number.isInteger(localPort) || localPort < 1024 || localPort > 65535) {
-  throw new Error('GTHDF_OVH_KUBE_PORT must be an unprivileged TCP port.');
+  throw new Error('GTHF_OVH_KUBE_PORT must be an unprivileged TCP port.');
 }
 
 if (!existsSync(kubeconfig)) {
@@ -93,7 +93,7 @@ try {
       '--kubeconfig',
       kubeconfig,
       '--context',
-      'gthdf-ovh-readonly',
+      'gthf-ovh-readonly',
     ],
     { stdio: 'inherit' },
   );

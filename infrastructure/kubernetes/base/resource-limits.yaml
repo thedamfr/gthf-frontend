@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ResourceQuota
 metadata:
-  name: gthdf-budget
+  name: gthf-budget
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
 spec:
   hard:
     requests.cpu: "2"
@@ -20,9 +20,9 @@ spec:
 apiVersion: v1
 kind: LimitRange
 metadata:
-  name: gthdf-defaults
+  name: gthf-defaults
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
 spec:
   limits:
     - type: Container

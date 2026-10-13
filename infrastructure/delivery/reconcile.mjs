@@ -10,7 +10,7 @@ import { requirePublication, readBoundedJson } from './publication.mjs';
 import { localCandidate, requireUnchangedRuntime, waitingState, requirePrivateState, reconcileNext } from './pull-policy.mjs';
 import { runDeployment } from './deployment-process.mjs';
 
-const root = '/home/ubuntu/gthdf-delivery';
+const root = '/home/ubuntu/gthf-delivery';
 const python = '/home/ubuntu/.cache/infra-sincere/ansible-2.21.4/bin/python';
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const checkOnly = process.argv.includes('--check');
@@ -32,20 +32,20 @@ function run(file, args, options = {}) {
   }
 }
 async function get(url, allowMissing = false) {
-  const response = await fetch(url, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gthdf-local-delivery' }, redirect: 'error', signal: AbortSignal.timeout(20000) });
+  const response = await fetch(url, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gthf-local-delivery' }, redirect: 'error', signal: AbortSignal.timeout(20000) });
   if (allowMissing && response.status === 404) return null;
   if (!response.ok) throw new Error(`Public release metadata unavailable (${response.status})`);
   return readBoundedJson(response);
 }
-const github = (component, path) => get(`https://api.github.com/repos/thedamfr/gthdf-${component}/${path}`);
+const github = (component, path) => get(`https://api.github.com/repos/thedamfr/gthf-${component}/${path}`);
 function repository(component, revisions) {
-  const path = join(root, 'repositories', `gthdf-${component}.git`);
+  const path = join(root, 'repositories', `gthf-${component}.git`);
   if (!existsSync(path)) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
     run('git', ['init', '--bare', path]);
-    run('git', ['-C', path, 'remote', 'add', 'origin', `https://github.com/thedamfr/gthdf-${component}.git`]);
+    run('git', ['-C', path, 'remote', 'add', 'origin', `https://github.com/thedamfr/gthf-${component}.git`]);
   }
-  if (run('git', ['-C', path, 'remote', 'get-url', 'origin']).trim() !== `https://github.com/thedamfr/gthdf-${component}.git`) throw new Error('Unexpected source repository');
+  if (run('git', ['-C', path, 'remote', 'get-url', 'origin']).trim() !== `https://github.com/thedamfr/gthf-${component}.git`) throw new Error('Unexpected source repository');
   for (const revision of new Set(revisions)) {
     if (!/^[a-f0-9]{40}$/.test(revision ?? '')) throw new Error('An exact source revision is required');
     run('git', ['-c', 'credential.helper=', '-C', path, 'fetch', '--depth=1', '--no-tags', 'origin', revision]);
@@ -53,7 +53,7 @@ function repository(component, revisions) {
   return path;
 }
 async function reconcile(component) {
-  const candidate = await get(`https://raw.githubusercontent.com/thedamfr/gthdf-${component}/gthdf-release/candidate.json?poll=${Date.now()}`, true);
+  const candidate = await get(`https://raw.githubusercontent.com/thedamfr/gthf-${component}/gthf-release/candidate.json?poll=${Date.now()}`, true);
   if (!candidate) return { component, status: 'no-publication' };
   const publication = candidate.publication;
   if (!publication || publication.component !== component || !Number.isSafeInteger(publication.runId) || !Number.isSafeInteger(publication.runAttempt)) throw new Error('Invalid release identity');
@@ -63,7 +63,7 @@ async function reconcile(component) {
   const production = read(join(root, 'production.json'));
   if (!production || production.status !== 'success') throw new Error('Verified production is required');
   if (same && state.status === 'success' && production.components[component].processedRevision === publication.revision) {
-    const deployment = JSON.parse(run('sudo', ['-n', '/snap/bin/microk8s', 'kubectl', '-n', 'gthdf-staging', 'get', 'deployment', `gthdf-${component}`, '-o', 'json']));
+    const deployment = JSON.parse(run('sudo', ['-n', '/snap/bin/microk8s', 'kubectl', '-n', 'gthf-staging', 'get', 'deployment', `gthf-${component}`, '-o', 'json']));
     requireUnchangedRuntime(deployment, production.components[component].image);
     return { component, status: 'unchanged' };
   }

@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: gthdf-cms
+  name: gthf-cms
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
     app.kubernetes.io/component: cms
 spec:
   ports:
@@ -13,16 +13,16 @@ spec:
       protocol: TCP
       targetPort: http
   selector:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
     app.kubernetes.io/component: cms
   type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: gthdf-cms
+  name: gthf-cms
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
     app.kubernetes.io/component: cms
 spec:
   replicas: 1
@@ -34,80 +34,80 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      app.kubernetes.io/name: gthdf
+      app.kubernetes.io/name: gthf
       app.kubernetes.io/component: cms
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: gthdf
+        app.kubernetes.io/name: gthf
         app.kubernetes.io/component: cms
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
-      serviceAccountName: gthdf
+      serviceAccountName: gthf
       terminationGracePeriodSeconds: 45
       securityContext:
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: cms
-          image: gthdf-cms:replace-me
+          image: gthf-cms:replace-me
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
-                name: gthdf-config
+                name: gthf-config
           env:
             - name: POSTGRES_PASSWORD
               valueFrom: &postgres-password
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: POSTGRES_PASSWORD
             - name: DATABASE_PASSWORD
               valueFrom: *postgres-password
             - name: APP_KEYS
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: APP_KEYS
             - name: API_TOKEN_SALT
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: API_TOKEN_SALT
             - name: ADMIN_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: ADMIN_JWT_SECRET
             - name: TRANSFER_TOKEN_SALT
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: TRANSFER_TOKEN_SALT
             - name: ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: ENCRYPTION_KEY
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: JWT_SECRET
             - name: PREVIEW_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: PREVIEW_SECRET
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: AWS_ACCESS_KEY_ID
             - name: AWS_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: gthdf-secrets
+                  name: gthf-secrets
                   key: AWS_SECRET_ACCESS_KEY
           ports:
             - name: http

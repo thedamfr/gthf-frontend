@@ -9,12 +9,12 @@ if (!source || process.argv.length !== 3) {
   process.exit(1);
 }
 
-const destination = '/home/ubuntu/gthdf-delivery/credentials/ovh-gthf.txt';
+const destination = '/home/ubuntu/gthf-delivery/credentials/ovh-gthf.txt';
 // The secret travels only through SSH stdin, never through command arguments or logs.
 const remote = `import os, pathlib, socket, sys, tempfile
 if socket.gethostname() != 'game-prod-ovh-gra':
     raise SystemExit('Serveur inattendu')
-directory = pathlib.Path('/home/ubuntu/gthdf-delivery/credentials')
+directory = pathlib.Path('/home/ubuntu/gthf-delivery/credentials')
 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 if directory.is_symlink() or directory.stat().st_uid != os.getuid():
     raise SystemExit('Dossier prive inattendu')

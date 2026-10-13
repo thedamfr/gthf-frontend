@@ -1,12 +1,12 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: gthdf-frontend
+  name: gthf-frontend
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
     app.kubernetes.io/component: frontend
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: gthdf-qualification-https-redirect@kubernetescrd,gthdf-qualification-staging-noindex@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: gthf-qualification-https-redirect@kubernetescrd,gthf-qualification-staging-noindex@kubernetescrd
 spec:
   ingressClassName: public
   rules:
@@ -17,23 +17,23 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: gthdf-staging-gateway
+                name: gthf-staging-gateway
                 port:
                   name: http
   tls:
     - hosts:
         - staging.gthf.fr
-      secretName: gthdf-qualification-tls
+      secretName: gthf-qualification-tls
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: gthdf-cms
+  name: gthf-cms
   labels:
-    app.kubernetes.io/name: gthdf
+    app.kubernetes.io/name: gthf
     app.kubernetes.io/component: cms
   annotations:
-    traefik.ingress.kubernetes.io/router.middlewares: gthdf-qualification-https-redirect@kubernetescrd,gthdf-qualification-staging-noindex@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: gthf-qualification-https-redirect@kubernetescrd,gthf-qualification-staging-noindex@kubernetescrd
     nginx.ingress.kubernetes.io/proxy-body-size: 10m
 spec:
   ingressClassName: public
@@ -45,10 +45,10 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: gthdf-staging-gateway
+                name: gthf-staging-gateway
                 port:
                   name: http
   tls:
     - hosts:
         - staging-cms.gthf.fr
-      secretName: gthdf-qualification-tls
+      secretName: gthf-qualification-tls

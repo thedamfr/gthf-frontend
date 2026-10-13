@@ -28,13 +28,13 @@ class FoundationTests(unittest.TestCase):
     def test_failed_resource_inspection_is_not_treated_as_absence(self):
         with patch.object(foundation.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout=b'')):
             with self.assertRaises(RuntimeError):
-                foundation.read_optional('gthdf-qualification', 'secret', 'gthdf-secrets')
+                foundation.read_optional('gthf-qualification', 'secret', 'gthf-secrets')
 
     def test_staging_configuration_does_not_inherit_production_endpoints(self):
         config = foundation.staging_configuration({'NODE_ENV': 'production', 'PRODUCTION_ONLY_ENDPOINT': 'https://production.example', 'DATABASE_URL': 'postgres://production', 'DATABASE_HOST': 'production-db'})
         self.assertNotIn('PRODUCTION_ONLY_ENDPOINT', config)
         self.assertNotIn('DATABASE_URL', config)
-        self.assertEqual(config['DATABASE_HOST'], 'gthdf-postgres')
+        self.assertEqual(config['DATABASE_HOST'], 'gthf-postgres')
         self.assertEqual(config['AWS_BUCKET'], 'gthf-staging-media-bis')
 
     def test_existing_target_volume_cannot_reference_production(self):

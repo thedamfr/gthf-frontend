@@ -1,14 +1,14 @@
 ---
 - name: Configure lightweight, read-only OVH observability
-  hosts: gthdf_staging
+  hosts: gthf_staging
   become: false
   gather_facts: false
   vars:
     observer_namespace: vps-observability
     observer_service_account: vps-observer
     observer_token_secret: vps-observer-token
-    observer_manifest: /home/production/gthdf-staging-prep/frontend/infrastructure/kubernetes/observability/read-only-observer.yaml
-    observer_kubeconfig: /home/production/gthdf-staging-prep/k9s-readonly.kubeconfig
+    observer_manifest: /home/production/gthf-staging-prep/frontend/infrastructure/kubernetes/observability/read-only-observer.yaml
+    observer_kubeconfig: /home/production/gthf-staging-prep/k9s-readonly.kubeconfig
   tasks:
     - name: Refuse any host other than the reviewed OVH VPS
       ansible.builtin.assert:
@@ -129,12 +129,12 @@
               user:
                 token: {{ observer_token }}
           contexts:
-            - name: gthdf-ovh-readonly
+            - name: gthf-ovh-readonly
               context:
                 cluster: game-prod-ovh-gra
                 user: vps-observer
-                namespace: gthdf-staging
-          current-context: gthdf-ovh-readonly
+                namespace: gthf-staging
+          current-context: gthf-ovh-readonly
       no_log: true
 
     - name: Verify observer read access

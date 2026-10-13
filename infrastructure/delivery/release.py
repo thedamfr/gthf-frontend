@@ -18,7 +18,7 @@ import tempfile
 import time
 import urllib.request
 
-NAMESPACES = {'production': 'gthdf-staging', 'staging': 'gthdf-qualification'}
+NAMESPACES = {'production': 'gthf-staging', 'staging': 'gthf-qualification'}
 HOSTS = {
     'production': {'frontend': 'https://gthf.fr', 'cms': 'https://cms.gthf.fr'},
     'staging': {'frontend': 'https://staging.gthf.fr', 'cms': 'https://staging-cms.gthf.fr'},
@@ -28,7 +28,7 @@ HOSTS = {
 def validate_component(name, component):
     if name not in ('cms', 'frontend'):
         raise ValueError('Unsupported component')
-    if not re.fullmatch(r'ghcr\.io/thedamfr/gthdf-' + name + r'@sha256:[a-f0-9]{64}', component.get('image', '')):
+    if not re.fullmatch(r'ghcr\.io/thedamfr/gthf-' + name + r'@sha256:[a-f0-9]{64}', component.get('image', '')):
         raise ValueError('An immutable GTHF image digest is required')
     if not re.fullmatch(r'[a-f0-9]{40}', component.get('revision', '')):
         raise ValueError('An exact Git revision is required')
@@ -55,12 +55,12 @@ def require_isolated_staging_routes(ingresses, alternate_routes=()):
                 raise RuntimeError('A wildcard or hostless Ingress may bypass the staging gateway')
             services = [path.get('backend', {}).get('service', {}) for path in rule.get('http', {}).get('paths', [])]
             if (ingress['metadata'].get('namespace') != NAMESPACES['staging'] or not services
-                    or any(service.get('name') != 'gthdf-staging-gateway' or service.get('port') not in ({'number': 3001}, {'name': 'http'}) for service in services)):
+                    or any(service.get('name') != 'gthf-staging-gateway' or service.get('port') not in ({'number': 3001}, {'name': 'http'}) for service in services)):
                 raise RuntimeError('Conflicting staging Ingress: complete the reviewed gateway cutover before delivery')
             tls = ingress.get('spec', {}).get('tls', [])
             middlewares = ingress['metadata'].get('annotations', {}).get('traefik.ingress.kubernetes.io/router.middlewares', '')
             if (not any(pattern in entry.get('hosts', []) and entry.get('secretName') for entry in tls)
-                    or 'gthdf-qualification-https-redirect@kubernetescrd' not in middlewares.split(',')):
+                    or 'gthf-qualification-https-redirect@kubernetescrd' not in middlewares.split(',')):
                 raise RuntimeError('Staging routes must retain TLS and the reviewed HTTPS redirect')
             found.add(rule['host'])
     if found != hosts:
@@ -167,8 +167,8 @@ def require_host():
 
 
 def current_main(component):
-    url = f'https://api.github.com/repos/thedamfr/gthdf-{component}/git/ref/heads/main'
-    request = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'gthdf-delivery'})
+    url = f'https://api.github.com/repos/thedamfr/gthf-{component}/git/ref/heads/main'
+    request = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'gthf-delivery'})
     with urllib.request.urlopen(request, timeout=20) as response:
         return json.load(response)['object']['sha']
 
@@ -193,7 +193,7 @@ def require_candidate_images(components, reference, verify_source=None):
 
 
 def source_equivalent(root, name, value):
-    repository = root / 'repositories' / ('gthdf-' + name + '.git')
+    repository = root / 'repositories' / ('gthf-' + name + '.git')
     planner = pathlib.Path(__file__).with_name('plan.mjs')
     def inputs(revision):
         return json.loads(command(['node', str(planner), str(repository), revision]))['fingerprints']['runtime']
@@ -207,7 +207,7 @@ def require_image_revision(config, revision):
 
 def verify_registry_components(root, components):
     # Use the existing read-only GHCR credential without placing it in argv or logs.
-    secret = json.loads(kubectl('staging', 'get', 'secret', 'gthdf-ghcr', '-o', 'json'))
+    secret = json.loads(kubectl('staging', 'get', 'secret', 'gthf-ghcr', '-o', 'json'))
     config = base64.b64decode(secret['data']['.dockerconfigjson'])
     with tempfile.TemporaryDirectory(prefix='registry-', dir=root) as directory:
         config_file = pathlib.Path(directory) / 'config.json'
@@ -226,9 +226,9 @@ class NoReleaseRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def http_json(url):
-    headers = {'Cache-Control': 'no-cache', 'User-Agent': 'gthdf-delivery'}
+    headers = {'Cache-Control': 'no-cache', 'User-Agent': 'gthf-delivery'}
     if any(url.startswith(origin + '/') for origin in HOSTS['staging'].values()):
-        credentials = load_json(pathlib.Path('/home/ubuntu/gthdf-delivery/staging-access.json'))
+        credentials = load_json(pathlib.Path('/home/ubuntu/gthf-delivery/staging-access.json'))
         headers['Authorization'] = 'Basic ' + base64.b64encode(('recette:' + credentials['gatewayPassword']).encode()).decode()
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.build_opener(NoReleaseRedirect()).open(request, timeout=30) as response:
@@ -275,7 +275,7 @@ def verify_components(environment, components):
 
 
 def deployment_name(name):
-    return 'gthdf-staging-gateway' if name == 'gateway' else 'gthdf-' + name
+    return 'gthf-staging-gateway' if name == 'gateway' else 'gthf-' + name
 
 
 def changed_workloads(environment, previous, candidate):
@@ -297,13 +297,13 @@ def patch_component(environment, name, value):
     for container in pod['containers'] + pod.get('initContainers', []):
         container['image'] = value['image']
         container['imagePullPolicy'] = 'IfNotPresent'
-    pod['imagePullSecrets'] = [{'name': 'gthdf-ghcr'}]
+    pod['imagePullSecrets'] = [{'name': 'gthf-ghcr'}]
     container = pod['containers'][0]
     container['lifecycle'] = {'preStop': {'exec': {'command': ['node', '-e', 'setTimeout(()=>{},10000)']}}}
     container['readinessProbe']['httpGet']['path'] = {'frontend': '/api/ready', 'cms': '/api/release', 'gateway': '/_gateway/health'}[name]
     container['readinessProbe']['timeoutSeconds'] = 5
     annotations = spec['template']['metadata'].setdefault('annotations', {})
-    annotations['gthdf.fr/source-revision'] = value['revision']
+    annotations['gthf.fr/source-revision'] = value['revision']
     kubectl(environment, 'patch', 'deployment', deployment_name(name), '--type=merge', '-p', json.dumps({'spec': spec}))
 
 
@@ -311,22 +311,22 @@ def backup_database(root):
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     path = root / 'backups' / (stamp + '.dump')
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    payload = kubectl('production', 'exec', 'gthdf-postgres-0', '--', 'pg_dump', '-U', 'gthdf', '-d', 'gthdf', '-Fc')
+    payload = kubectl('production', 'exec', 'gthf-postgres-0', '--', 'pg_dump', '-U', 'gthdf', '-d', 'gthdf', '-Fc')
     if not payload.startswith(b'PGDMP'):
         raise RuntimeError('PostgreSQL backup is not a custom archive')
     with open(path, 'wb', opener=lambda p, flags: os.open(p, flags, 0o600)) as stream:
         stream.write(payload)
     if len(payload) > 100 * 1024 * 1024:
         raise RuntimeError('Backup saved; a larger verification workspace must be provisioned before promotion')
-    remote_path = '/tmp/gthdf-backup-' + stamp + '.dump'
+    remote_path = '/tmp/gthf-backup-' + stamp + '.dump'
     try:
         # Partial archive reads can leave kubectl stdin blocked; validate a complete file.
-        kubectl('production', 'cp', str(path), 'gthdf-postgres-0:' + remote_path)
-        listing = kubectl('production', 'exec', 'gthdf-postgres-0', '--', 'pg_restore', '--list', remote_path)
+        kubectl('production', 'cp', str(path), 'gthf-postgres-0:' + remote_path)
+        listing = kubectl('production', 'exec', 'gthf-postgres-0', '--', 'pg_restore', '--list', remote_path)
         if b'TABLE DATA' not in listing:
             raise RuntimeError('PostgreSQL backup does not contain table data')
     finally:
-        kubectl('production', 'exec', 'gthdf-postgres-0', '--', 'rm', '-f', remote_path)
+        kubectl('production', 'exec', 'gthf-postgres-0', '--', 'rm', '-f', remote_path)
     return str(path)
 
 
@@ -335,7 +335,7 @@ def reconcile_infrastructure(environment, components):
     overlay = pathlib.Path(__file__).parent.parent / 'kubernetes' / 'overlays' / ('production' if environment == 'production' else 'qualification')
     rendered = command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', 'kustomize', str(overlay)])
     resources = [value for value in yaml.safe_load_all(rendered) if value]
-    config = next(value['data'] for value in resources if value['kind'] == 'ConfigMap' and value['metadata']['name'] == 'gthdf-config')
+    config = next(value['data'] for value in resources if value['kind'] == 'ConfigMap' and value['metadata']['name'] == 'gthf-config')
     previous = []
     allowed = {'ConfigMap', 'Deployment', 'Service', 'NetworkPolicy', 'ResourceQuota', 'LimitRange', 'ServiceAccount', 'Ingress', 'Certificate', 'Issuer', 'Middleware'}
     for resource in resources:
@@ -345,23 +345,23 @@ def reconcile_infrastructure(environment, components):
             raise RuntimeError('Infrastructure crosses the application boundary')
         if resource['kind'] == 'Deployment':
             name = resource['metadata']['name']
-            component = {'gthdf-cms': 'cms', 'gthdf-frontend': 'frontend', 'gthdf-staging-gateway': 'frontend'}.get(name)
+            component = {'gthf-cms': 'cms', 'gthf-frontend': 'frontend', 'gthf-staging-gateway': 'frontend'}.get(name)
             if not component:
                 raise RuntimeError('Unexpected application deployment')
             pod = resource['spec']['template']['spec']
             for container in pod['containers'] + pod.get('initContainers', []):
                 container['image'] = components[component]['image']
                 container['imagePullPolicy'] = 'IfNotPresent'
-            pod['imagePullSecrets'] = [{'name': 'gthdf-ghcr'}]
+            pod['imagePullSecrets'] = [{'name': 'gthf-ghcr'}]
             relevant = {key: value for key, value in config.items() if (
                 (component == 'frontend' and key in ('NODE_ENV', 'STRAPI_URL', 'PUBLIC_STRAPI_URL', 'SITE_URL', 'STRAPI_MEDIA_ORIGINS', 'ITINERARY_BASEMAP_ENABLED'))
                 or (component == 'cms' and key not in ('STRAPI_URL', 'PUBLIC_STRAPI_URL', 'SITE_URL', 'STRAPI_MEDIA_ORIGINS', 'ITINERARY_BASEMAP_ENABLED'))
             )}
             annotations = resource['spec']['template']['metadata'].setdefault('annotations', {})
-            annotations['gthdf.fr/config-revision'] = hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()
-            annotations['gthdf.fr/source-revision'] = components[component]['revision']
+            annotations['gthf.fr/config-revision'] = hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()
+            annotations['gthf.fr/source-revision'] = components[component]['revision']
             pod['containers'][0]['lifecycle'] = {'preStop': {'exec': {'command': ['node', '-e', 'setTimeout(()=>{},10000)']}}}
-            if name != 'gthdf-staging-gateway':
+            if name != 'gthf-staging-gateway':
                 pod['containers'][0]['readinessProbe']['httpGet']['path'] = '/api/ready' if component == 'frontend' else '/api/release'
                 pod['containers'][0]['readinessProbe']['timeoutSeconds'] = 5
         old = kubectl(environment, 'get', resource['kind'], resource['metadata']['name'], '--ignore-not-found', '-o', 'json')
@@ -370,13 +370,13 @@ def reconcile_infrastructure(environment, components):
         for resource in resources:
             if resource['kind'] in allowed and resource['kind'] != 'Deployment':
                 kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
-        for name in ('gthdf-cms', 'gthdf-frontend', 'gthdf-staging-gateway'):
+        for name in ('gthf-cms', 'gthf-frontend', 'gthf-staging-gateway'):
             resource = next((value for value in resources if value['kind'] == 'Deployment' and value['metadata']['name'] == name), None)
             if resource:
                 kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
                 kubectl(environment, 'rollout', 'status', 'deployment/' + name, '--timeout=300s')
-                if name != 'gthdf-staging-gateway':
-                    component = 'cms' if name == 'gthdf-cms' else 'frontend'
+                if name != 'gthf-staging-gateway':
+                    component = 'cms' if name == 'gthf-cms' else 'frontend'
                     verify_components(environment, {component: components[component]})
     except Exception:
         restore_infrastructure(environment, previous)
@@ -428,7 +428,7 @@ def activate(root, environment, candidate, recipe):
             if environment == 'production' and candidate.get('publication'):
                 from observation import OriginMonitor, prometheus_proof
                 report['monitoringBefore'] = prometheus_proof()
-                secret = json.loads(kubectl('production', 'get', 'secret', 'gthdf-secrets', '-o', 'json'))
+                secret = json.loads(kubectl('production', 'get', 'secret', 'gthf-secrets', '-o', 'json'))
                 monitor = OriginMonitor(base64.b64decode(secret['data']['STRAPI_API_TOKEN']).decode())
                 monitor.thread.start()
                 time.sleep(10)
@@ -491,7 +491,7 @@ def main():
     signal.signal(signal.SIGINT, interrupt_delivery)
     parser = argparse.ArgumentParser()
     parser.add_argument('operation', choices=['deliver', 'check', 'status', 'reserve', 'release'])
-    parser.add_argument('--state-dir', default='/home/ubuntu/gthdf-delivery')
+    parser.add_argument('--state-dir', default='/home/ubuntu/gthf-delivery')
     parser.add_argument('--candidate')
     parser.add_argument('--owner', default='operator')
     parser.add_argument('--minutes', type=int, default=60)
