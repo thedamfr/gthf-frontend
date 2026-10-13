@@ -13,6 +13,7 @@ const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const MODEL = '/content-manager/collection-types/api::article.article';
 const DEADLINE = 300000;
+const derivativeFixture = () => sharp({ create: { width: 1200, height: 800, channels: 3, background: { r: 37, g: 112, b: 168 } } }).png().toBuffer();
 
 export class RecoveryJourneys {
   constructor(bench) {
@@ -259,7 +260,7 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     return { key, rtoMs, durableObjectRecovered: true, acknowledgedWritesPreserved: true };
   }
   async partialDerivativeUpload() {
-    const bytes = await sharp({ create: { width: 1200, height: 800, channels: 3, background: { r: 37, g: 112, b: 168 } } }).png().toBuffer();
+    const bytes = await derivativeFixture();
     const key = randomUUID(); await this.gate('after-object', key, 0);
     const request = this.upload(key, { bytes, name: 'recovery-derivatives.png' }).then(() => true, () => false);
     await this.observed('after-object', key);
@@ -302,7 +303,8 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     return { key, rtoMs, postgresDelayMs: 20000, s3AdditionalDelayMs: 20000, secondCrashDuringRecovery: true };
   }
   async replaceAfterCommit() {
-    const original = (await this.upload(randomUUID()))[0];
+    const original = await this.assertMedia(await this.upload(randomUUID(), { bytes: await derivativeFixture() }), { width: 1200, height: 800 });
+    assert.ok(Object.keys(original.formats).length >= 2);
     const key = randomUUID(); await this.gate('after-commit', key);
     const request = this.upload(key, { id: original.id }).then(() => false, () => true);
     await this.observed('after-commit', key);
@@ -312,21 +314,34 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     const rtoMs = Date.now() - returnedAt; assert.ok(rtoMs <= DEADLINE);
     const replaced = await this.assertMedia(receipt.result);
     assert.equal(replaced.id, original.id); assert.notEqual(replaced.url, original.url);
-    const replay = await this.upload(key, { id: original.id }); assert.equal(replay.id, original.id); assert.equal(replay.url, replaced.url);
+    const replay = await this.assertMedia(await this.upload(key, { id: original.id })); assert.equal(replay.id, original.id); assert.equal(replay.url, replaced.url);
     assert.equal(await this.operationCount(key), 1); await this.assertArticle();
-    this.obsoleteMedia.push({ url: original.url, replacedAt: Date.now() });
+    await this.assertMedia(original, { width: 1200, height: 800 });
+    const retention = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-c', "SELECT extract(epoch from(c.not_before-o.updated_at))*1000 FROM gthf_media_cleanup c JOIN gthf_media_operations o ON o.key=c.operation_key WHERE o.key='" + key + "'"]);
+    assert.ok(Number(retention.stdout.toString().trim()) >= 600000, 'The durable cleanup schedule must retain objects for the real public cache TTLs');
+    for (const object of [original, ...Object.values(original.formats)]) this.obsoleteMedia.push({ url: object.url, replacedAt: Date.now() });
     return { key, rtoMs, immutableReplacement: true, lostResponseReplayed: true };
   }
   async deletion() {
-    const original = (await this.upload(randomUUID()))[0]; const key = randomUUID();
+    const original = await this.assertMedia(await this.upload(randomUUID(), { bytes: await derivativeFixture() }), { width: 1200, height: 800 });
+    const objects = [original, ...Object.values(original.formats)]; assert.ok(objects.length >= 3);
+    const key = randomUUID();
     await this.gate('during-cleanup', key);
     await this.admin('/upload/files/' + original.id, { method: 'DELETE', headers: { 'Idempotency-Key': key } });
-    await this.observed('during-cleanup', key); await this.signal('cms'); await this.applications();
+    await this.observed('during-cleanup', key);
+    let remainingBeforeKill = 0;
+    for (const object of objects) if ((await this.request('minio', new URL(object.url).pathname, { allow: [404] })).ok) remainingBeforeKill += 1;
+    assert.ok(remainingBeforeKill > 0 && remainingBeforeKill < objects.length, 'The crash must interrupt a partially completed object cleanup');
+    await this.signal('cms'); await this.applications();
     await this.receipt(key, 'committed'); assert.equal(await this.fileCount(original.id), 0);
     await this.admin('/upload/files/' + original.id, { method: 'DELETE', headers: { 'Idempotency-Key': key } });
-    await this.eventually('Deleted object cleanup', async () => (await this.request('minio', new URL(original.url).pathname, { allow: [404] })).status === 404);
+    await this.eventually('All deleted image objects cleaned after the real crash', async () => {
+      for (const object of objects) if ((await this.request('minio', new URL(object.url).pathname, { allow: [404] })).status !== 404) return false;
+      const pending = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-c', "SELECT count(*) FROM gthf_media_cleanup WHERE operation_key='" + key + "'"]);
+      return Number(pending.stdout.toString().trim()) === 0;
+    });
     assert.equal(await this.operationCount(key), 1);
-    return { key, referenceRemovedBeforeCleanup: true, deleteReplayUnique: true };
+    return { key, objects: objects.length, remainingBeforeKill, cleanupTaskRemovedAfterResume: true, referenceRemovedBeforeCleanup: true, deleteReplayUnique: true };
   }
   async interruptedPublication() {
     const created = await this.admin(MODEL, { method: 'POST', json: {
@@ -380,6 +395,10 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     const strict = await this.request('frontendA', '/api/ready', { allow: [503] }); assert.equal(strict.status, 503);
     // Use the real 60s/300s TTLs: an immediate hit would not qualify stale fallback.
     await sleep(301000);
+    for (const object of this.obsoleteMedia) {
+      const response = await this.request('minio', new URL(object.url).pathname);
+      assert.equal(sha256(Buffer.from(await response.arrayBuffer())), this.mediaChecksums.get(object.url), 'The previous public media bytes must survive past the longest cache TTL');
+    }
     for (const path of routes) {
       const response = await this.request('frontendA', path, { timeout: 60000 }); const body = await response.text();
       if (path.endsWith('/gpx') || path.endsWith('/geometry')) assert.equal(sha256(body), sha256(warmed.get(path)));
@@ -411,7 +430,7 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
       const page = await (await this.request(frontend, '/article/recovery-published')).text();
       assert.ok(page.includes(this.acknowledgedTitle));
     }
-    return { warmPublicRoutes: routes.length, realCacheExpiryWaitMs: 301000, coldTemporaryError: cold.status, previewBypassedCache: true, frozenProcessRestarted: true, rtoMs };
+    return { warmPublicRoutes: routes.length, realCacheExpiryWaitMs: 301000, previousMediaRetainedPastCacheTtl: true, coldTemporaryError: cold.status, previewBypassedCache: true, frozenProcessRestarted: true, rtoMs };
   }
   async revocation() {
     await this.request('frontendA', '/article/recovery-published');

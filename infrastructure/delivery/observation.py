@@ -66,8 +66,6 @@ class OriginMonitor:
         started = time.monotonic()
         status = None
         error_type = None
-        with self.lock:
-            transition = self.cms_transition if self.cms_transition and self.cms_transition['closedAt'] is None else None
         failure = None
         try:
             headers = {'User-Agent': 'gthf-delivery', 'Cache-Control': 'no-cache'}
@@ -90,9 +88,14 @@ class OriginMonitor:
             return failure
         finally:
             connection.close()
-            finished = time.monotonic()
-            expected = bool(failure and host == 'cms.gthf.fr' and transition
-                            and finished <= transition['deadline'])
+            # A request can straddle either boundary. Classify its result against
+            # the transition that is still open when the request completes.
+            with self.lock:
+                finished = time.monotonic()
+                transition = self.cms_transition
+                expected = bool(failure and host == 'cms.gthf.fr' and transition
+                                and transition['closedAt'] is None
+                                and finished <= transition['deadline'])
             if failure is not None:
                 failure['expected'] = expected
             self.record_result(host, path, status, started, finished, error_type, expected)

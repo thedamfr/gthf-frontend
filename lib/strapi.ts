@@ -5,6 +5,7 @@ import { draftMode } from 'next/headers';
 import { withStrapiStatus } from './strapi-status';
 import { readCmsJson } from './cms-read.ts';
 import { PublicContentRejected } from './public-content-cache.ts';
+import { validStrapiResponse } from './strapi-response.ts';
 
 const STRAPI_URL = runtimeUrls().strapi || 'http://localhost:1337';
 const STRAPI_API_TOKEN = process.env.STRAPI_API_TOKEN;
@@ -132,7 +133,7 @@ export async function fetchAPI<T>(options: StrapiRequestOptions): Promise<T> {
     const data = await readCmsJson<Record<string, unknown>>(requestUrl, {
       token: STRAPI_API_TOKEN, public: !isDraftPreview,
       revalidate: cacheMode === 'no-store' ? 0 : revalidate,
-      validate: (value) => !wrappedByList || Array.isArray((value as { data?: unknown }).data),
+      validate: (value) => validStrapiResponse(value, wrappedByKey, wrappedByList),
     });
 
     if (wrappedByKey) {

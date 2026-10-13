@@ -20,14 +20,14 @@ mkdirSync(attempt, { mode: 0o700 });
 const sourceRevision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 let success = false;
 try {
+  assert.equal(execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { encoding: 'utf8' }).trim(), '', 'Commit the exact harness candidate before every campaign phase');
+  assert.equal(sourceRevision, manifest.sourceRevisions.frontend, 'Harness and frontend candidate revisions differ');
   await bench.waitGuest();
   if (values.phase === 'prepare' || values.phase === 'resume-prepare') await prepareVm(bench, { resume: values.phase === 'resume-prepare' });
   else if (values.phase === 'resume-fixtures') await resumeFixtures(bench);
   else if (values.phase === 'install') await installCandidate(bench);
   else if (values.phase === 'journal') await checkJournal(bench);
   else {
-    assert.equal(execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { encoding: 'utf8' }).trim(), '', 'Commit the exact harness candidate before qualification');
-    assert.equal(sourceRevision, manifest.sourceRevisions.frontend, 'Harness and frontend candidate revisions differ');
     journeys = new RecoveryJourneys(bench);
     await journeys.run();
   }

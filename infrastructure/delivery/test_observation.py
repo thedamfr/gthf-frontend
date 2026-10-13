@@ -30,11 +30,15 @@ class TransitionObservationTests(unittest.TestCase):
         self.monitor = observation.OriginMonitor('synthetic-test-token')
         self.monitor.thread = Mock(is_alive=Mock(return_value=True))
 
-    def sample(self, host, status):
+    def sample(self, host, status, before_response=None):
         response = Mock(status=status)
         response.read.return_value = b'<h1>Available</h1>'
         connection = Mock()
-        connection.getresponse.return_value = response
+        def receive():
+            if before_response:
+                before_response()
+            return response
+        connection.getresponse.side_effect = receive
         with patch.object(observation, 'OriginConnection', return_value=connection):
             result = self.monitor.request(host, '/page', 'page')
         self.monitor.record_cycle([result])
@@ -75,6 +79,29 @@ class TransitionObservationTests(unittest.TestCase):
         self.assertFalse(self.sample('cms.gthf.fr', 503)['expected'])
         with self.assertRaisesRegex(RuntimeError, 'availability failure'):
             self.monitor.wait_for_continuous_health(60)
+
+    def test_probe_started_in_transition_but_finished_after_close_is_blocking(self):
+        self.monitor.begin_cms_transition(390)
+        self.clock = 1
+        def close_transition():
+            self.clock = 2
+            self.monitor.end_cms_transition()
+        result = self.sample('cms.gthf.fr', 503, before_response=close_transition)
+        self.assertFalse(result['expected'])
+        self.assertFalse(self.monitor.records[-1]['expectedInterruption'])
+        with self.assertRaisesRegex(RuntimeError, 'availability failure'):
+            self.monitor.require_available()
+
+    def test_probe_started_before_transition_but_finished_inside_it_is_expected(self):
+        self.clock = 1
+        def open_transition():
+            self.clock = 2
+            self.monitor.begin_cms_transition(390)
+        result = self.sample('cms.gthf.fr', 503, before_response=open_transition)
+        self.assertTrue(result['expected'])
+        self.assertTrue(self.monitor.records[-1]['expectedInterruption'])
+        self.monitor.require_available()
+        self.assertEqual(len(self.monitor.expected_errors), 1)
 
     def test_transition_expiry_cannot_be_hidden_by_closing_the_window(self):
         self.monitor.begin_cms_transition(20)

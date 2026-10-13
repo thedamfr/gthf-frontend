@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { EVIDENCE_ROOT, GUEST_ROOT, NAMESPACE, requireRegularPath, validateManifest } from './manifest.mjs';
@@ -48,7 +48,24 @@ function inspect(ref, revision) {
   if (revision) assert.equal(data.Config.Labels['org.opencontainers.image.revision'], revision);
   return { ref: reference, digest: reference.split('@')[1], imageId: data.Id, ...(revision ? { revision } : {}) };
 }
-const images = {};
+const dependencyPath = join(root, 'dependency-images.json');
+let dependencies;
+if (existsSync(dependencyPath)) {
+  requireRegularPath(dependencyPath, { privateFile: true });
+  dependencies = JSON.parse(readFileSync(dependencyPath, 'utf8'));
+  assert.equal(dependencies.schemaVersion, 1);
+  assert.equal(dependencies.runId, values['run-id']);
+  assert.equal(dependencies.vmUuid, values.uuid);
+  for (const name of ['postgres', 'minio']) {
+    const archive = dependencies.archives[name];
+    requireRegularPath(archive.path, { privateFile: true });
+    assert.ok(!relative(root, archive.path).startsWith('..'), 'Dependency archive belongs to another campaign');
+    assert.equal(statSync(archive.path).size, archive.bytes);
+    assert.equal(await checksum(archive.path), archive.sha256, 'Frozen dependency archive changed');
+  }
+}
+const images = dependencies ? structuredClone(dependencies.images) : {};
+const archives = dependencies ? structuredClone(dependencies.archives) : {};
 const frozen = {};
 for (const [component, source] of [['cms', cms], ['frontend', front]]) {
   const directory = join(artifacts, component + '-source');
@@ -63,18 +80,20 @@ for (const component of ['cms', 'frontend']) {
   await command('build-' + component, ['sudo', '-n', 'docker', 'buildx', 'build', '--load', '--tag', tag, '--build-arg', 'GTHF_REVISION=' + revisions[component], '.'], frozen[component]);
   images[component] = inspect(tag, revisions[component]);
 }
-images.postgres = inspect('gthf-postgres@sha256:350a73c4b179649dbf542a425f01e37e24d3129432c61a9fd86b7675d924a1b0');
-const minioDirectory = join(artifacts, 'minio-context'); mkdirSync(minioDirectory, { mode: 0o700 });
-const minioVersion = 'RELEASE.2025-09-07T16-13-09Z';
-const minioSha = '7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f';
-await command('download-minio', ['curl', '--fail', '--location', '--max-time', '180', '--output', join(minioDirectory, 'minio'), 'https://github.com/minio/minio/releases/download/' + minioVersion + '/minio.linux-amd64.' + minioVersion]);
-assert.equal(await checksum(join(minioDirectory, 'minio')), minioSha, 'Official MinIO binary checksum mismatch');
-writeFileSync(join(minioDirectory, 'Dockerfile'), readFileSync(join(frozen.frontend, 'scripts/recovery/Dockerfile.minio')), { mode: 0o600 });
-const minioTag = 'gthf-recovery-minio:' + minioSha.slice(0, 16);
-await command('build-minio', ['sudo', '-n', 'docker', 'buildx', 'build', '--load', '--tag', minioTag, '.'], minioDirectory);
-images.minio = { ...inspect(minioTag), upstreamVersion: minioVersion, upstreamSha256: minioSha };
-const archives = {};
+if (!dependencies) {
+  images.postgres = inspect('gthf-postgres@sha256:350a73c4b179649dbf542a425f01e37e24d3129432c61a9fd86b7675d924a1b0');
+  const minioDirectory = join(artifacts, 'minio-context'); mkdirSync(minioDirectory, { mode: 0o700 });
+  const minioVersion = 'RELEASE.2025-09-07T16-13-09Z';
+  const minioSha = '7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f';
+  await command('download-minio', ['curl', '--fail', '--location', '--max-time', '180', '--output', join(minioDirectory, 'minio'), 'https://github.com/minio/minio/releases/download/' + minioVersion + '/minio.linux-amd64.' + minioVersion]);
+  assert.equal(await checksum(join(minioDirectory, 'minio')), minioSha, 'Official MinIO binary checksum mismatch');
+  writeFileSync(join(minioDirectory, 'Dockerfile'), readFileSync(join(frozen.frontend, 'scripts/recovery/Dockerfile.minio')), { mode: 0o600 });
+  const minioTag = 'gthf-recovery-minio:' + minioSha.slice(0, 16);
+  await command('build-minio', ['sudo', '-n', 'docker', 'buildx', 'build', '--load', '--tag', minioTag, '.'], minioDirectory);
+  images.minio = { ...inspect(minioTag), upstreamVersion: minioVersion, upstreamSha256: minioSha };
+}
 for (const [name, image] of Object.entries(images)) {
+  if (dependencies && ['postgres', 'minio'].includes(name)) continue;
   const path = join(artifacts, name + '.tar');
   const original = join(artifacts, name + '-docker.tar');
   await command('export-' + name, ['sudo', '-n', 'docker', 'image', 'save', '--output', original, image.ref]);
@@ -91,6 +110,11 @@ const manifest = validateManifest({ schemaVersion: 1, target: 'vm', namespace: N
   sourceRevisions: { ...revisions, infra: infrastructureLock.revision }, images, archives,
   builtAt: new Date().toISOString(),
 }, { target: 'vm', infraRevision: infrastructureLock.revision });
+if (!dependencies) {
+  writeFileSync(dependencyPath, JSON.stringify({ schemaVersion: 1, runId: values['run-id'], vmUuid: values.uuid,
+    images: { postgres: images.postgres, minio: images.minio }, archives: { postgres: archives.postgres, minio: archives.minio },
+  }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+}
 const path = join(root, 'manifest-' + revisions.cms.slice(0, 12) + '-' + revisions.frontend.slice(0, 12) + '.json');
 assert.ok(!existsSync(path), 'A previous campaign manifest is never overwritten');
 writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 });

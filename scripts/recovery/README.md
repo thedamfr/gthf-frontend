@@ -93,6 +93,10 @@ Les builds utilisent une archive Git figée, jamais un checkout qui peut évolue
 pendant Docker. L’export OCI conserve son index, son manifeste Linux amd64 et sa
 configuration, vérifiés par SHA256 ; le format Docker historique sans RepoTags
 est écarté. Le harnais vérifie aussi les images des init-containers Next.
+Toutes les phases exigent le checkout propre à la révision du manifeste.
+`dependency-images.json` fige les images et archives PostgreSQL/MinIO dès le
+premier build de la campagne ; les builds applicatifs suivants les réutilisent
+après vérification d’identité et de checksum, sans changer les dépendances durables.
 
 ### Identité, preuves et nettoyage
 

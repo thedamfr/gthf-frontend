@@ -51,6 +51,7 @@ export function profile(manifest, credentials, fixtureSource) {
     DATABASE_NAME: manifest.database, DATABASE_USERNAME: 'gthf_recovery', DATABASE_SSL: 'false', DATABASE_FORCE_MIGRATION: 'false',
     DATABASE_POOL_MIN: '1', DATABASE_POOL_MAX: '3',
     AWS_ENDPOINT: 'http://minio:9000', AWS_CDN_URL: 'http://minio:9000/' + manifest.bucket, AWS_REGION: 'us-east-1', AWS_BUCKET: manifest.bucket,
+    MEDIA_ALLOWED_ORIGINS: 'http://minio:9000,http://127.0.0.1:' + LOCAL_PORTS.minio,
     GTHF_RECOVERY_CAMPAIGN: manifest.vm.uuid, GTHF_RECOVERY_ISOLATED: 'true', GTHF_RECOVERY_FAULT_DIR: '/recovery/faults',
     GTHF_NAMESPACE: NAMESPACE, STRAPI_URL: 'http://cms:1337', PUBLIC_STRAPI_URL: 'http://127.0.0.1:' + LOCAL_PORTS.cms,
     SITE_URL: 'http://127.0.0.1:' + LOCAL_PORTS.frontendA, STRAPI_MEDIA_ORIGINS: 'http://minio:9000',

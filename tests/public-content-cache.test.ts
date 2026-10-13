@@ -4,6 +4,23 @@ import { once } from 'node:events';
 import test from 'node:test';
 import { readCmsJson } from '../lib/cms-read.ts';
 import { PublicContentCache, PublicContentRejected, PublicContentUnavailable } from '../lib/public-content-cache.ts';
+import { validStrapiResponse } from '../lib/strapi-response.ts';
+
+test('malformed singleton responses preserve the last validated object, while confirmed null revokes it', async () => {
+  let now = 0;
+  const cache = new PublicContentCache(4096, () => now);
+  const singleton = 'http://cms.test/api/homepage?status=published';
+  const options = { public: true, revalidate: 0, cache, validate: (value: unknown) => validStrapiResponse(value, 'data') };
+  const published = { data: { title: 'Published home' } };
+  await readCmsJson(singleton, { ...options, fetchImpl: async () => Response.json(published) });
+  for (const malformed of [{ data: [] }, {}, { data: false }, { data: 'wrong' }]) {
+    now += 1100;
+    assert.deepEqual(await readCmsJson(singleton, { ...options, fetchImpl: async () => Response.json(malformed) }), published);
+  }
+  now += 1100;
+  assert.deepEqual(await readCmsJson(singleton, { ...options, fetchImpl: async () => Response.json({ data: null }) }), { data: null });
+  assert.deepEqual(await readCmsJson(singleton, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), { data: null });
+});
 
 const url = 'http://cms.test/api/articles?status=published';
 
