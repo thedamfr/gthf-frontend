@@ -107,8 +107,8 @@ def command(arguments, *, data=None, timeout=600):
     return result.stdout
 
 
-def kubectl(environment, *arguments, data=None):
-    return command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', '-n', NAMESPACES[environment], *arguments], data=data)
+def kubectl(environment, *arguments, data=None, timeout=600):
+    return command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', '-n', NAMESPACES[environment], *arguments], data=data, timeout=timeout)
 
 
 def save_json(path, value):
@@ -225,13 +225,13 @@ class NoReleaseRedirect(urllib.request.HTTPRedirectHandler):
         raise RuntimeError('Release proof cannot redirect to another endpoint')
 
 
-def http_json(url):
+def http_json(url, timeout=30):
     headers = {'Cache-Control': 'no-cache', 'User-Agent': 'gthf-delivery'}
     if any(url.startswith(origin + '/') for origin in HOSTS['staging'].values()):
         credentials = load_json(pathlib.Path('/home/ubuntu/gthf-delivery/staging-access.json'))
         headers['Authorization'] = 'Basic ' + base64.b64encode(('recette:' + credentials['gatewayPassword']).encode()).decode()
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.build_opener(NoReleaseRedirect()).open(request, timeout=30) as response:
+    with urllib.request.build_opener(NoReleaseRedirect()).open(request, timeout=timeout) as response:
         if 'no-store' not in response.headers.get('Cache-Control', ''):
             raise RuntimeError('Release proof can be cached')
         return json.load(response)
@@ -239,11 +239,60 @@ def http_json(url):
 
 def serving_deployment_pods(pods):
     return [pod for pod in pods if not pod['metadata'].get('deletionTimestamp')
+            and pod.get('status', {}).get('phase') not in ('Succeeded', 'Failed')
             and any(owner.get('kind') == 'ReplicaSet' for owner in pod['metadata'].get('ownerReferences', []))]
 
 
-def verify_components(environment, components):
+def verify_public_revision(environment, name, value, evidence):
+    """Allow draining old processes/connections to converge, never advance on a stale proof."""
+    deadline = time.monotonic() + 90
+    path = '/api/health' if name == 'frontend' else '/api/release'
+    while time.monotonic() < deadline:
+        pods = json.loads(kubectl(environment, 'get', 'pods', '-l', 'app.kubernetes.io/component=' + name, '-o', 'json', timeout=min(5, deadline - time.monotonic())))['items']
+        old = [pod for pod in pods if pod.get('status', {}).get('phase') not in ('Succeeded', 'Failed')
+               and any(owner.get('kind') == 'ReplicaSet' for owner in pod['metadata'].get('ownerReferences', []))
+               and any(container['image'] != value['image'] for container in pod['spec']['containers'] + pod['spec'].get('initContainers', []))]
+        observation = {'checkedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                       'oldPods': [{'uid': pod['metadata'].get('uid'), 'terminating': bool(pod['metadata'].get('deletionTimestamp'))} for pod in old]}
+        evidence.append(observation)
+        # An unexpected live workload is not a normal rolling-update drain.
+        if any(not pod['metadata'].get('deletionTimestamp') for pod in old):
+            raise RuntimeError('An unexpected old workload remains active after rollout')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            proof = http_json(HOSTS[environment][name] + path + '?release=' + value['revision'], timeout=min(5, remaining))
+            revision = proof.get('revision')
+            observation['revision'] = revision if isinstance(revision, str) and re.fullmatch(r'[a-f0-9]{40}', revision) else 'invalid'
+            observation['expectedRevision'] = proof.get('status') == 'ok' and revision == value['revision']
+            if observation['expectedRevision'] and not old:
+                # Routing admission can remain green on a warm cache during a CMS
+                # outage. A delivery still requires an uncached dependency proof.
+                if name == 'frontend':
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    readiness = http_json(HOSTS[environment][name] + '/api/ready', timeout=min(5, remaining))
+                    observation['dependenciesReady'] = readiness.get('status') == 'ready'
+                    if not observation['dependenciesReady']:
+                        raise RuntimeError('Frontend dependencies are not ready for delivery')
+                return
+        except (OSError, ValueError) as error:
+            # Keep only the exception type, never URLs/credentials or response bodies.
+            observation['transportError'] = type(error).__name__
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(1, remaining))
+    raise RuntimeError('Public endpoint did not converge to the expected release within 90 seconds')
+
+
+def verify_components(environment, components, evidence=None):
+    if evidence is None:
+        evidence = []
     for name, value in components.items():
+        verification = {'component': name, 'revision': value['revision'], 'observations': []}
+        evidence.append(verification)
         kubectl(environment, 'rollout', 'status', 'deployment/' + deployment_name(name), '--timeout=300s')
         pods = json.loads(kubectl(environment, 'get', 'pods', '-l', 'app.kubernetes.io/component=' + name, '-o', 'json'))
         running = serving_deployment_pods(pods['items'])
@@ -268,10 +317,8 @@ def verify_components(environment, components):
                     raise RuntimeError('The init-container did not complete with the expected image')
         if name == 'gateway':
             continue
-        path = '/api/health' if name == 'frontend' else '/api/release'
-        proof = http_json(HOSTS[environment][name] + path + '?release=' + value['revision'])
-        if proof.get('status') != 'ok' or proof.get('revision') != value['revision']:
-            raise RuntimeError('Public endpoint does not serve the expected release')
+        verify_public_revision(environment, name, value, verification['observations'])
+    return evidence
 
 
 def deployment_name(name):
@@ -300,7 +347,7 @@ def patch_component(environment, name, value):
     pod['imagePullSecrets'] = [{'name': 'gthf-ghcr'}]
     container = pod['containers'][0]
     container['lifecycle'] = {'preStop': {'exec': {'command': ['node', '-e', 'setTimeout(()=>{},10000)']}}}
-    container['readinessProbe']['httpGet']['path'] = {'frontend': '/api/ready', 'cms': '/api/release', 'gateway': '/_gateway/health'}[name]
+    container['readinessProbe']['httpGet']['path'] = {'frontend': '/api/serving', 'cms': '/api/release', 'gateway': '/_gateway/health'}[name]
     container['readinessProbe']['timeoutSeconds'] = 5
     annotations = spec['template']['metadata'].setdefault('annotations', {})
     annotations['gthf.fr/source-revision'] = value['revision']
@@ -362,7 +409,7 @@ def reconcile_infrastructure(environment, components):
             annotations['gthf.fr/source-revision'] = components[component]['revision']
             pod['containers'][0]['lifecycle'] = {'preStop': {'exec': {'command': ['node', '-e', 'setTimeout(()=>{},10000)']}}}
             if name != 'gthf-staging-gateway':
-                pod['containers'][0]['readinessProbe']['httpGet']['path'] = '/api/ready' if component == 'frontend' else '/api/release'
+                pod['containers'][0]['readinessProbe']['httpGet']['path'] = '/api/serving' if component == 'frontend' else '/api/release'
                 pod['containers'][0]['readinessProbe']['timeoutSeconds'] = 5
         old = kubectl(environment, 'get', resource['kind'], resource['metadata']['name'], '--ignore-not-found', '-o', 'json')
         previous.append((resource['kind'], resource['metadata']['name'], json.loads(old) if old else None))
@@ -439,8 +486,8 @@ def activate(root, environment, candidate, recipe):
                 if name in changed:
                     if not infrastructure_snapshot:
                         patch_component(environment, name, changed[name])
-                    verify_components(environment, {name: changed[name]})
-            verify_components(environment, combined)
+                    verify_components(environment, {name: changed[name]}, evidence=report.setdefault('componentVerification', []))
+            verify_components(environment, combined, evidence=report.setdefault('componentVerification', []))
             if environment == 'staging':
                 verify_components(environment, {'gateway': combined['frontend']})
             command(['node', str(recipe), environment], timeout=600)

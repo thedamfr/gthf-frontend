@@ -1,11 +1,7 @@
 import { runtimeUrls } from '../runtime-config.ts';
 import 'server-only';
 
-import {
-  decodeUtf8,
-  readResponseBytesWithLimit,
-  ResponseSizeLimitError,
-} from '../bounded-response.ts';
+import { readCmsJson } from '../cms-read.ts';
 import {
   buildGpxBuilderManifest,
   createDisabledGpxBuilderManifest,
@@ -18,7 +14,6 @@ import {
 } from './cache-policy.ts';
 
 const STRAPI_RESPONSE_LIMIT_BYTES = 3 * 1024 * 1024;
-const STRAPI_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
 
 function strapiConfiguration(): { baseUrl: string; token: string } {
   const token = process.env.STRAPI_API_TOKEN;
@@ -43,31 +38,14 @@ async function requestStrapiJson<T>(
   requestKind: GpxBuilderStrapiRequestKind
 ): Promise<T> {
   const { baseUrl, token } = strapiConfiguration();
-  const response = await fetch(`${baseUrl}${pathname}?${query}`, {
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    ...gpxBuilderStrapiCacheOptions(requestKind),
-    redirect: 'error',
-    signal: AbortSignal.timeout(STRAPI_REQUEST_TIMEOUT_MILLISECONDS),
+  const policy = gpxBuilderStrapiCacheOptions(requestKind);
+  return readCmsJson<T>(`${baseUrl}${pathname}?${query}`, {
+    token, public: true, revalidate: 'next' in policy ? policy.next.revalidate : 0,
+    maximumBytes: STRAPI_RESPONSE_LIMIT_BYTES,
+    validate: (value) => requestKind === 'feature-switch'
+      ? typeof (value as { data?: { gpxBuilderEnabled?: unknown } }).data?.gpxBuilderEnabled === 'boolean'
+      : Array.isArray((value as { data?: unknown }).data),
   });
-  if (!response.ok) {
-    throw new Error(`strapi_${response.status}`);
-  }
-
-  try {
-    const bytes = await readResponseBytesWithLimit(
-      response,
-      STRAPI_RESPONSE_LIMIT_BYTES
-    );
-    return JSON.parse(decodeUtf8(bytes)) as T;
-  } catch (error) {
-    if (error instanceof ResponseSizeLimitError) {
-      throw new Error('strapi_response_too_large');
-    }
-    throw new Error('invalid_strapi_response');
-  }
 }
 
 async function featureEnabled(): Promise<boolean> {

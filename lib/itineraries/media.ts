@@ -7,6 +7,10 @@ import {
   type LoadedItineraryArtifact,
 } from './media-core';
 import type { GuardedItinerary } from './types';
+import { VerifiedArtifactCache } from './verified-artifact-cache';
+
+const shared = globalThis as typeof globalThis & { gthfArtifactCache?: VerifiedArtifactCache };
+const publicCache = shared.gthfArtifactCache ??= new VerifiedArtifactCache();
 
 export {
   contentDispositionAttachment,
@@ -31,12 +35,14 @@ function strapiBaseUrl(): string {
 
 export function loadItineraryArtifact(
   entry: GuardedItinerary,
-  kind: ItineraryArtifactKind
+  kind: ItineraryArtifactKind,
+  options: { preview?: boolean } = {}
 ): Promise<LoadedItineraryArtifact> {
   return loadItineraryArtifactWithDependencies(entry, kind, {
     fetchImpl: fetch,
     strapiBaseUrl: strapiBaseUrl(),
     allowedOrigins: configuredMediaOrigins(),
     timeoutSignal: AbortSignal.timeout,
+    publicCache: options.preview ? undefined : publicCache,
   });
 }

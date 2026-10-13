@@ -3,6 +3,8 @@ import { runtimeUrls } from './runtime-config.ts';
 import { cache } from 'react';
 import { draftMode } from 'next/headers';
 import { withStrapiStatus } from './strapi-status';
+import { readCmsJson } from './cms-read.ts';
+import { PublicContentRejected } from './public-content-cache.ts';
 
 const STRAPI_URL = runtimeUrls().strapi || 'http://localhost:1337';
 const STRAPI_API_TOKEN = process.env.STRAPI_API_TOKEN;
@@ -109,20 +111,6 @@ export async function fetchAPI<T>(options: StrapiRequestOptions): Promise<T> {
     ...(isDraftPreview ? draftQuery : {}),
   }, isDraftPreview);
 
-  const mergedOptions = {
-    ...(isDraftPreview || cacheMode === 'no-store'
-      ? { cache: 'no-store' as const }
-      : cacheMode
-        ? { cache: cacheMode }
-        : { next: { revalidate } }),
-    headers: {
-      'Content-Type': 'application/json',
-      ...(STRAPI_API_TOKEN && {
-        Authorization: `Bearer ${STRAPI_API_TOKEN}`,
-      }),
-    },
-  };
-
   const queryString = new URLSearchParams();
   
   Object.entries(requestQuery).forEach(([key, value]) => {
@@ -141,13 +129,11 @@ export async function fetchAPI<T>(options: StrapiRequestOptions): Promise<T> {
   const requestUrl = `${STRAPI_URL}/api${endpoint}${queryString.toString() ? `?${queryString.toString()}` : ''}`;
 
   try {
-    const response = await fetch(requestUrl, mergedOptions);
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch data from Strapi: ${response.statusText}`);
-    }
-
-    const data = await response.json();
+    const data = await readCmsJson<Record<string, unknown>>(requestUrl, {
+      token: STRAPI_API_TOKEN, public: !isDraftPreview,
+      revalidate: cacheMode === 'no-store' ? 0 : revalidate,
+      validate: (value) => !wrappedByList || Array.isArray((value as { data?: unknown }).data),
+    });
 
     if (wrappedByKey) {
       return data[wrappedByKey] as T;
@@ -290,7 +276,8 @@ export const getHomepage = cache(async () => {
       },
       wrappedByKey: 'data',
     });
-  } catch {
+  } catch (error) {
+    if (!(error instanceof PublicContentRejected) || error.status !== 400) throw error;
     // Fallback without mapPreviewImage (schema may not be deployed yet)
     return fetchAPI({
       endpoint: '/homepage',

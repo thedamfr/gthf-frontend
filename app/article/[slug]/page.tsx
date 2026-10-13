@@ -61,12 +61,7 @@ function toAbsoluteMediaUrl(url: string | undefined, strapiUrl: string) {
 export default async function ArticlePage({ params }: ArticlePageProps) {
   const { slug } = await params;
 
-  let article = null;
-  try {
-    article = await getArticleBySlug(slug);
-  } catch (error) {
-    console.error('Error loading article:', error);
-  }
+  const article = await getArticleBySlug(slug);
 
   if (!article) {
     notFound();

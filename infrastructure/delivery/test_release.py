@@ -166,7 +166,7 @@ class DeliveryTests(unittest.TestCase):
         calls = []
         saved = []
 
-        def verify(environment, components):
+        def verify(environment, components, evidence=None):
             if 'frontend' in components:
                 calls.append(('verify', components['frontend']['image']))
                 if components['frontend']['image'] == 'candidate':
