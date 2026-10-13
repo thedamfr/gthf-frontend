@@ -79,6 +79,8 @@ export async function readCmsJson<T>(url: string, options: CmsReadOptions): Prom
   if (!options.public) return load();
   const entityTags = (value: T): string[] => records(value).flatMap(recordTags);
   return (options.cache ?? publicCache).read({ key, scope, ttlMs: options.revalidate * 1000, load,
+    parentScope: parsed.pathname === '/api/global' ? identity + ':/api/global' : undefined,
+    withdrawsParent: (value) => (value as { data: unknown }).data === null,
     tags: parsed.pathname === '/api/global' ? undefined : entityTags,
     changedTags: parsed.pathname === '/api/global' ? undefined : changedEntityTags,
     revokedTags: (value) => {

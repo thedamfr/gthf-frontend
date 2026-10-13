@@ -118,7 +118,7 @@ try {
   await app.db.query('api::chapter.chapter').update({ where: { id: chapter.id }, data: { gpxFileAB: gpxFile.id } });
   const route = await dbCreate('api::reference-route.reference-route', { name: 'Parcours synthétique', routeKey: 'recovery-route', slug: 'recovery-route', isLoop: false, catalogueEnabled: true, algorithmVersion, sourceManifestHash: sourceHash, currentInputFingerprint, publishedAt: now });
   const run = await dbCreate('api::catalogue-run.catalogue-run', { runKey: 'recovery:' + uuid, mode: 'apply', scope: {}, operator: 'synthetic-fixture', startedAt: now, completedAt: now, codeVersion: env.GTHF_REVISION || 'qualification', inputHash: sourceHash, reportHash: evaluationHash, status: 'succeeded' });
-  const itinerary = await dbCreate('api::city-itinerary.city-itinerary', { businessKey: 'recovery-route:FR-RECOVERY-A:FR-RECOVERY-B', title: 'De la ville synthétique A à la ville B', slug: 'recovery-itinerary', route: route.id, cityA: cityA.id, cityB: cityB.id, reviewStatus: 'approved', publicationNext: true, seoStatus: 'noindex', currentEvaluationHash: evaluationHash, publishedAt: now });
+  const itinerary = await dbCreate('api::city-itinerary.city-itinerary', { businessKey: 'recovery-route:FR-RECOVERY-A:FR-RECOVERY-B', title: 'De la ville synthétique A à la ville B', slug: 'recovery-itinerary', route: route.id, cityA: cityA.id, cityB: cityB.id, reviewStatus: 'approved', publicationNext: true, seoStatus: 'indexable', currentEvaluationHash: evaluationHash, publishedAt: now });
   const chapterComponent = await app.db.query('catalogue.chapter-on-route').create({ data: { chapter: chapter.id, routeOrder: 0, distanceMetres: 3000, direction: 'ab' } });
   const cityComponents = [];
   for (const [city, routeOrder, chainage] of [[cityA, 0, 0], [cityB, 1, 3000]]) cityComponents.push(await app.db.query('catalogue.city-on-route').create({ data: { city: city.id, routeOrder, occurrenceIndex: 0, chainageFromDepartureMetres: chainage } }));
@@ -155,6 +155,7 @@ try {
   assert.equal(persisted.cityA.id, cityA.id);
   assert.equal(persisted.cityB.id, cityB.id);
   assert.equal(persisted.currentEvaluationHash, evaluationHash);
+  assert.equal(persisted.seoStatus, 'indexable');
   const active = persisted.activeRevision;
   assert.equal(active?.id, revision.id);
   assert.equal(active.revisionKey, revisionKey);

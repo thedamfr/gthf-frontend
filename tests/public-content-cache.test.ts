@@ -162,3 +162,36 @@ test('an explicitly absent published global closes a previously open feature thr
   assert.deepEqual(await readCmsJson(flag, { ...options, fetchImpl: async () => Response.json({ data: null }) }), { data: null });
   assert.deepEqual(await readCmsJson(flag, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), { data: null });
 });
+
+test('global withdrawal or access rejection revokes all projections without coupling independent field updates', async () => {
+  const base = 'http://cms.test/api/global?status=published';
+  const catalogue = base + '&fields[0]=publishCityItinerariesToNext';
+  const builder = base + '&fields[0]=gpxBuilderEnabled';
+  const offline: typeof fetch = async () => { throw new Error('offline'); };
+  for (const rejection of [false, true]) {
+    const cache = new PublicContentCache();
+    const options = { public: true, revalidate: 0, cache };
+    const open = { data: { publishCityItinerariesToNext: true } };
+    await readCmsJson(catalogue, { ...options, fetchImpl: async () => Response.json(open) });
+    await readCmsJson(builder, { ...options, fetchImpl: async () => Response.json({ data: { gpxBuilderEnabled: true } }) });
+    await readCmsJson(builder, { ...options, fetchImpl: async () => Response.json({ data: { gpxBuilderEnabled: false } }) });
+    assert.deepEqual(await readCmsJson(catalogue, { ...options, fetchImpl: offline }), open);
+    if (rejection) await assert.rejects(readCmsJson(base, { ...options, fetchImpl: async () => new Response('', { status: 403 }) }), PublicContentRejected);
+    else await readCmsJson(base, { ...options, fetchImpl: async () => Response.json({ data: null }) });
+    await assert.rejects(readCmsJson(catalogue, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+    await assert.rejects(readCmsJson(builder, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+  }
+});
+
+test('a delayed global projection cannot reopen content after another projection confirms withdrawal', async () => {
+  const cache = new PublicContentCache();
+  const options = { public: true, revalidate: 0, cache };
+  const base = 'http://cms.test/api/global?status=published';
+  let complete!: (response: Response) => void;
+  const pending = readCmsJson(base + '&fields[0]=publishCityItinerariesToNext', {
+    ...options, fetchImpl: () => new Promise((resolve) => { complete = resolve; }),
+  });
+  await readCmsJson(base, { ...options, fetchImpl: async () => Response.json({ data: null }) });
+  complete(Response.json({ data: { publishCityItinerariesToNext: true } }));
+  await assert.rejects(pending, PublicContentUnavailable);
+});

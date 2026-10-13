@@ -8,6 +8,7 @@ import { uploadPng } from '../../infrastructure/delivery/upload-fixture.mjs';
 import { GUEST_ROOT, requireRegularPath } from './manifest.mjs';
 import { COMPONENTS, PORTS, LOCAL_PORTS } from './profile.mjs';
 import { verifyImages } from './prepare-vm.mjs';
+import { injectInterruptedMedia } from './late-put.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -280,7 +281,7 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     }
     const receipt = (await this.receipt(key, 'failed')).value;
     assert.equal(receipt.error, 'AUTHORIZATION_REVOKED'); assert.equal(receipt.retryable, false);
-    await assert.rejects(this.upload(key)); assert.equal(await this.operationCount(key), 1);
+    await assert.rejects(this.upload(key), /Unexpected isolated HTTP status 409 for cms\/upload/); assert.equal(await this.operationCount(key), 1);
     return { key, rtoMs, currentRightsCheckedDuringRecovery: true, noFileCommitted: true, objectsCleaned: objects.length, terminalReplayPreserved: true };
   }
   async completeUploadPowerCut() {
@@ -305,19 +306,51 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     const originalObjects = await this.operationObjects(key);
     assert.ok(originalObjects.length >= 3, 'The interruption must leave a genuinely incomplete multi-object upload');
     await this.assertObjects(originalObjects.slice(0, 1));
+    const oldBytes = Buffer.from(await (await this.request('minio', '/' + this.bench.manifest.bucket + '/' + originalObjects[0].key)).arrayBuffer());
+    assert.equal(sha256(oldBytes), originalObjects[0].sha256); assert.equal(oldBytes.length, originalObjects[0].bytes);
     await this.signal('cms'); assert.equal(await request, false); await this.applications();
     await this.receipt(key, 'interrupted');
-    await this.eventually('Incomplete upload objects cleaned automatically', async () => {
+    const cleanupSweep = async () => {
+      const response = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-v', 'ON_ERROR_STOP=1', '-c',
+        "SELECT row_to_json(c) FROM (SELECT id,attempt,updated_at,(lease_owner IS NULL AND not_before>clock_timestamp()) AS rescheduled FROM gthf_media_cleanup WHERE recurring=true AND state='pending' AND operation_key='" + key + "') c"]);
+      const value = JSON.parse(response.stdout.toString().trim());
+      assert.match(value.id, UUID); assert.match(value.attempt, UUID); assert.ok(Number.isFinite(Date.parse(value.updated_at)));
+      return value;
+    };
+    const firstSweep = (await this.eventually('Incomplete upload cleaned with its late-write intention retained', async () => {
       for (const object of originalObjects) if ((await this.request('minio', '/' + this.bench.manifest.bucket + '/' + object.key, { allow: [404] })).status !== 404) return false;
-      return true;
-    });
+      const sweep = await cleanupSweep(); return sweep.rescheduled ? sweep : false;
+    })).value;
     const result = await this.upload(key, { bytes, name: 'recovery-derivatives.png' });
     const media = await this.assertMedia(result, { width: 1200, height: 800 });
     assert.ok(Object.keys(media.formats).length >= 2);
     const retried = await this.operationObjects(key); await this.assertObjects(retried);
     assert.ok(retried.every((object) => !originalObjects.some((old) => old.key === object.key)));
     assert.equal(await this.operationCount(key), 1);
-    return { key, originalObjects: originalObjects.length, finalObjects: retried.length, partialObjectsRemoved: true, derivativesVerified: true };
+
+    // Explicit simulation: replay the exact old immutable bytes only AFTER the
+    // first real MinIO cleanup. No provider-side delayed request is claimed.
+    await injectInterruptedMedia(this.bench, { attempt: firstSweep.attempt, object: originalObjects[0], bytes: oldBytes, role: 'delayed-put' });
+    const foreignBytes = Buffer.from('Synthetic foreign ownership fixture: ' + key);
+    const foreign = { key: originalObjects[1].key, sha256: sha256(foreignBytes), bytes: foreignBytes.length, mime: 'text/plain' };
+    assert.notEqual(foreign.sha256, originalObjects[1].sha256);
+    await injectInterruptedMedia(this.bench, { attempt: firstSweep.attempt, object: foreign, bytes: foreignBytes, role: 'foreign-collision' });
+    await this.assertObjects([foreign]);
+    const recovered = await this.eventually('A recurring sweep removes the late old PUT and preserves foreign ownership', async () => {
+      if ((await this.request('minio', '/' + this.bench.manifest.bucket + '/' + originalObjects[0].key, { allow: [404] })).status !== 404) return false;
+      const sweep = await cleanupSweep();
+      assert.equal(sweep.id, firstSweep.id); assert.equal(sweep.attempt, firstSweep.attempt);
+      if (!sweep.rescheduled || Date.parse(sweep.updated_at) <= Date.parse(firstSweep.updated_at)) return false;
+      await this.assertObjects([foreign, ...retried]);
+      return true;
+    });
+    await this.assertMedia(result, { width: 1200, height: 800 });
+    // The deliberate foreign object remains in this disposable VM until teardown.
+    // Removing it here would invalidate the ownership protection being exercised.
+    return { key, originalObjects: originalObjects.length, finalObjects: retried.length, partialObjectsRemoved: true, derivativesVerified: true,
+      delayedPut: { simulation: 'explicit old-byte reinjection after first real MinIO cleanup; not provider/network delay',
+        recoveredWithinMs: recovered.elapsedMs, recurringIntentionRetained: true, retryObjectsPreserved: true,
+        foreignCollisionPreserved: true, syntheticForeignObjectsRetainedUntilVmTeardown: 1 } };
   }
   async lateDependenciesAndSecondCrash() {
     const key = randomUUID(); await this.gate('before-commit', key);

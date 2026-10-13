@@ -10,10 +10,12 @@ export class PublicContentRejected extends Error {
   constructor(status: number) { super(`Public content rejected (${status})`); this.status = status; this.name = 'PublicContentRejected'; }
 }
 
-interface Entry<T> { value: T; serialized: string; bytes: number; checkedAt: number; failedAt?: number; scope: string; tags: string[] }
+interface Entry<T> { value: T; serialized: string; bytes: number; checkedAt: number; failedAt?: number; scope: string; parentScope?: string; tags: string[] }
 interface LoadOptions<T> {
   key: string;
   scope: string;
+  parentScope?: string;
+  withdrawsParent?: (value: T) => boolean;
   ttlMs: number;
   load: () => Promise<T>;
   tags?: (value: T) => string[];
@@ -36,7 +38,7 @@ export class PublicContentCache {
   invalidate(scope: string, tags?: string[]) {
     this.generations.set(scope, (this.generations.get(scope) ?? 0) + 1);
     for (const [key, entry] of this.entries) {
-      if (entry.scope === scope && (!tags || entry.tags.some((tag) => tags.includes(tag)))) {
+      if ((entry.scope === scope || entry.parentScope === scope) && (!tags || entry.tags.some((tag) => tags.includes(tag)))) {
         this.entries.delete(key); this.bytes -= entry.bytes;
       }
     }
@@ -59,6 +61,7 @@ export class PublicContentCache {
 
   private async refresh<T>(options: LoadOptions<T>, previous?: Entry<T>): Promise<T> {
     const generation = this.generations.get(options.scope) ?? 0;
+    const parentGeneration = options.parentScope ? this.generations.get(options.parentScope) ?? 0 : 0;
     let value: T;
     try { value = await options.load(); }
     catch (error) {
@@ -68,10 +71,12 @@ export class PublicContentCache {
         return previous.value;
       }
       // Confirmed denials/absence cannot revive an earlier public representation.
-      if (code === 'CMS_REJECTED') this.invalidate(options.scope);
+      if (code === 'CMS_REJECTED') this.invalidate(options.parentScope ?? options.scope);
       throw error;
     }
     if ((this.generations.get(options.scope) ?? 0) !== generation) throw new PublicContentUnavailable();
+    if (options.parentScope && (this.generations.get(options.parentScope) ?? 0) !== parentGeneration) throw new PublicContentUnavailable();
+    if (options.parentScope && options.withdrawsParent?.(value)) this.invalidate(options.parentScope);
     const serialized = JSON.stringify(value);
     const bytes = new TextEncoder().encode(serialized).byteLength;
     // A confirmed update/withdrawal also invalidates other queries of this collection.
@@ -97,7 +102,7 @@ export class PublicContentCache {
         const [key, oldest] = this.entries.entries().next().value!;
         this.entries.delete(key); this.bytes -= oldest.bytes;
       }
-      this.entries.set(options.key, { value: structuredClone(value), serialized, bytes, checkedAt: this.now(), scope: options.scope, tags });
+      this.entries.set(options.key, { value: structuredClone(value), serialized, bytes, checkedAt: this.now(), scope: options.scope, parentScope: options.parentScope, tags });
       this.bytes += bytes;
     }
     return value;
