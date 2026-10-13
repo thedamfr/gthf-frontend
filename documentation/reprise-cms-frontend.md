@@ -29,9 +29,7 @@ avec éviction des entrées les moins récemment lues. Il n'est ni partagé ni
 persistant : le remplacement d'une instance commence à froid. Les octets GPX et
 géométrie validés par SHA-256 disposent d'un cache distinct de 64 entrées/32 Mio ;
 la garde de publication et les métadonnées sont vérifiées avant chaque accès.
-Une preview n'utilise et n'alimente aucun de ces caches. Après une panne, une
-nouvelle tentative est permise après une seconde ; une lecture réussie rafraîchit
-le contenu. La fraîcheur reste soumise aux durées de validité indiquées.
+Les previews restent hors cache ; les pannes sont réessayées après une seconde.
 
 `/api/serving` admet une nouvelle instance après une vraie lecture CMS réussie,
 puis conserve cette admission pendant la vie du processus pour permettre les
@@ -40,7 +38,12 @@ lectures chaudes. `/api/health` reste la santé locale et l'identité de l'image
 peut pas être validée grâce au seul cache chaud. Le déployeur vérifie d'abord les
 images et labels OCI exacts, puis attend au plus 90 secondes la fin des anciens
 processus et la révision publique attendue. Une mauvaise image échoue directement.
-Les observations intermédiaires sont conservées dans le rapport privé.
+
+La première activation livre d’abord le frontend compatible, puis remplace le
+CMS en `Recreate`, sans anciens et nouveaux writers simultanés. Son interruption
+attendue est chronométrée dans une fenêtre de 390 secondes maximum ; le
+frontend et les erreurs hors fenêtre restent bloquants. Ensuite, 60 secondes
+continues de santé sont exigées. Les activations suivantes restent progressives.
 
 Un journal média existant interdit le rollback automatique vers un ancien CMS
 sans capacité de reprise attestée, même avec zéro opération en attente. La
@@ -79,6 +82,28 @@ validée. Dès qu'un retrait est confirmé sur cette instance, les anciennes
 réponses concernées ne sont plus réutilisées, y compris par une lecture déjà
 en cours. Les autres instances apprennent le changement à leur prochaine
 revalidation. Aucun contenu privé ou draft n'est accepté dans le cache public.
+
+### Activation initiale et interruption mesurée
+
+La première activation du journal média utilise `Recreate` pour le CMS seul :
+le déploiement et l’image précédents doivent correspondre à la preuve livrée,
+et le manifeste/configuration OCI local doit attester l’absence du label de
+reprise. Les anciens processus s’arrêtent avant le nouveau worker. Une image
+précédente attestée v1 conserve `RollingUpdate` ; une preuve inaccessible ou
+incohérente bloque avant mutation. Les deux chemins de livraison, image seule
+et infrastructure, imposent cette stratégie avant de créer le nouveau pod.
+
+L’observation de production ouvre alors une seule fenêtre CMS, bornée à
+390 secondes autour de son remplacement. Elle conserve chaque échec et la
+durée observée de chaque interruption. Une erreur frontend ou hors fenêtre
+reste bloquante. Après fermeture, il faut 60 secondes continues de réponses
+saines, puis les preuves Prometheus fraîches. La fenêtre ne masque ni une
+coupure excessive ni l’échéance totale de dix minutes de l’observation.
+
+Le frontend candidat est livré et qualifié avant le premier remplacement du
+CMS. `/api/serving` doit confirmer son admission et la page frontend surveillée
+est réchauffée avant l’ouverture de la fenêtre. Un ancien frontend dépourvu de
+cette admission bloque la transition avant mutation CMS.
 
 ### Retour arrière et intentions médias
 

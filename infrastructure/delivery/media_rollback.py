@@ -52,18 +52,27 @@ def target_capability(deployment, command):
         raise RuntimeError('CMS rollback images cannot be verified')
     image = images.pop()
     revision = template['metadata'].get('annotations', {}).get('gthf.fr/source-revision', '')
+    capability = image_capability(image, revision, command)
+    if capability['mediaRecoveryVersion'] != '1':
+        raise RuntimeError('CMS rollback target does not attest media recovery version 1 at the expected revision')
+    return capability
+
+
+def image_capability(image, revision, command):
+    """Read only the exact locally cached previous image; never guess its capability."""
     if not re.fullmatch(r'ghcr\.io/thedamfr/gthf-cms@sha256:[a-f0-9]{64}', image) or not re.fullmatch(r'[a-f0-9]{40}', revision):
-        raise RuntimeError('CMS rollback requires an immutable image and expected revision')
+        raise RuntimeError('CMS transition requires an immutable image and expected revision')
     manifest_digest = image.split('@')[1]
     manifest = json.loads(command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', manifest_digest], timeout=20))
     config_digest = manifest.get('config', {}).get('digest', '')
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', config_digest):
-        raise RuntimeError('CMS rollback requires a single-platform image manifest')
+        raise RuntimeError('CMS transition requires a single-platform image manifest')
     config = json.loads(command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', config_digest], timeout=20))
     labels = config.get('config', {}).get('Labels', {})
-    if labels.get('org.opencontainers.image.revision') != revision or labels.get('io.gthf.media-recovery') != '1':
-        raise RuntimeError('CMS rollback target does not attest media recovery version 1 at the expected revision')
-    return {'image': image, 'revision': revision, 'mediaRecoveryVersion': '1'}
+    version = labels.get('io.gthf.media-recovery')
+    if labels.get('org.opencontainers.image.revision') != revision or version not in (None, '1'):
+        raise RuntimeError('CMS transition image revision or media recovery capability is unsupported')
+    return {'image': image, 'revision': revision, 'mediaRecoveryVersion': version or '0'}
 
 
 def require_media_rollback(environment, deployment, kubectl, command, evidence):

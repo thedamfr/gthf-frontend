@@ -336,10 +336,51 @@ def snapshot_components(environment, names):
     return {name: json.loads(kubectl(environment, 'get', 'deployment', deployment_name(name), '-o', 'json')) for name in names}
 
 
-def patch_component(environment, name, value):
+def cms_rollout_policy(previous, deployment):
+    from media_rollback import image_capability
+    template = deployment['spec']['template']
+    containers = template['spec']['containers'] + template['spec'].get('initContainers', [])
+    if (not containers or any(item['image'] != previous['image'] for item in containers)
+            or template['metadata'].get('annotations', {}).get('gthf.fr/source-revision') != previous['revision']):
+        raise RuntimeError('Current CMS deployment does not match the previous verified release')
+    proof = image_capability(previous['image'], previous['revision'], command)
+    return {**proof, 'strategy': 'Recreate' if proof['mediaRecoveryVersion'] == '0' else 'RollingUpdate'}
+
+
+def configure_cms_strategy(spec, strategy):
+    if strategy not in ('Recreate', 'RollingUpdate'):
+        raise ValueError('Unsupported CMS rollout strategy')
+    # JSON merge patches must explicitly remove the old rollingUpdate object.
+    spec['strategy'] = {'type': strategy, 'rollingUpdate': None if strategy == 'Recreate' else {'maxSurge': 1, 'maxUnavailable': 0}}
+
+
+@contextlib.contextmanager
+def observe_cms_transition(monitor, strategy, environment):
+    if strategy == 'Recreate':
+        # The previous frontend cannot survive this deliberate CMS outage.
+        # Admit the cache-capable frontend before stopping the legacy CMS.
+        admission = http_json(HOSTS[environment]['frontend'] + '/api/serving')
+        if admission.get('status') != 'serving':
+            raise RuntimeError('Initial media recovery requires an admitted recovery-capable frontend')
+        if monitor is not None:
+            monitor.warm_frontend()
+    expected = monitor is not None and strategy == 'Recreate'
+    if expected:
+        monitor.begin_cms_transition(maximum_seconds=390)
+    try:
+        yield
+    finally:
+        if expected:
+            monitor.end_cms_transition()
+
+
+def patch_component(environment, name, value, cms_strategy='RollingUpdate'):
     deployment = json.loads(kubectl(environment, 'get', 'deployment', deployment_name(name), '-o', 'json'))
     spec = deployment['spec']
-    spec['strategy'] = {'type': 'RollingUpdate', 'rollingUpdate': {'maxSurge': 1, 'maxUnavailable': 0}}
+    if name == 'cms':
+        configure_cms_strategy(spec, cms_strategy)
+    else:
+        spec['strategy'] = {'type': 'RollingUpdate', 'rollingUpdate': {'maxSurge': 1, 'maxUnavailable': 0}}
     pod = spec['template']['spec']
     for container in pod['containers'] + pod.get('initContainers', []):
         container['image'] = value['image']
@@ -377,7 +418,7 @@ def backup_database(root):
     return str(path)
 
 
-def reconcile_infrastructure(environment, components):
+def reconcile_infrastructure(environment, components, cms_strategy='RollingUpdate', monitor=None):
     import yaml
     overlay = pathlib.Path(__file__).parent.parent / 'kubernetes' / 'overlays' / ('production' if environment == 'production' else 'qualification')
     rendered = command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', 'kustomize', str(overlay)])
@@ -395,6 +436,8 @@ def reconcile_infrastructure(environment, components):
             component = {'gthf-cms': 'cms', 'gthf-frontend': 'frontend', 'gthf-staging-gateway': 'frontend'}.get(name)
             if not component:
                 raise RuntimeError('Unexpected application deployment')
+            if name == 'gthf-cms':
+                configure_cms_strategy(resource['spec'], cms_strategy)
             pod = resource['spec']['template']['spec']
             for container in pod['containers'] + pod.get('initContainers', []):
                 container['image'] = components[component]['image']
@@ -417,14 +460,16 @@ def reconcile_infrastructure(environment, components):
         for resource in resources:
             if resource['kind'] in allowed and resource['kind'] != 'Deployment':
                 kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
-        for name in ('gthf-cms', 'gthf-frontend', 'gthf-staging-gateway'):
+        names = ('gthf-frontend', 'gthf-cms', 'gthf-staging-gateway') if cms_strategy == 'Recreate' else ('gthf-cms', 'gthf-frontend', 'gthf-staging-gateway')
+        for name in names:
             resource = next((value for value in resources if value['kind'] == 'Deployment' and value['metadata']['name'] == name), None)
             if resource:
-                kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
-                kubectl(environment, 'rollout', 'status', 'deployment/' + name, '--timeout=300s')
-                if name != 'gthf-staging-gateway':
-                    component = 'cms' if name == 'gthf-cms' else 'frontend'
-                    verify_components(environment, {component: components[component]})
+                with observe_cms_transition(monitor if name == 'gthf-cms' else None, cms_strategy if name == 'gthf-cms' else 'RollingUpdate', environment):
+                    kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
+                    kubectl(environment, 'rollout', 'status', 'deployment/' + name, '--timeout=300s')
+                    if name != 'gthf-staging-gateway':
+                        component = 'cms' if name == 'gthf-cms' else 'frontend'
+                        verify_components(environment, {component: components[component]})
     except Exception:
         restore_infrastructure(environment, previous)
         raise
@@ -480,8 +525,12 @@ def activate(root, environment, candidate, recipe):
             require_isolated_staging_routes(ingresses['items'], alternate['items'])
         changed = changed_workloads(environment, previous['components'], combined)
         snapshots = snapshot_components(environment, changed)
+        cms_policy = cms_rollout_policy(previous['components']['cms'], snapshots['cms']) if 'cms' in changed else None
+        cms_strategy = cms_policy['strategy'] if cms_policy else 'RollingUpdate'
         infrastructure_snapshot = []
         report = {'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'environment': environment, 'components': combined, 'deployerRevision': candidate['deployerRevision']}
+        if cms_policy:
+            report['cmsTransition'] = cms_policy
         monitor = None
         if environment == 'production' and 'cms' in changed:
             report['backup'] = backup_database(root)
@@ -495,28 +544,30 @@ def activate(root, environment, candidate, recipe):
                 time.sleep(10)
                 monitor.require_available()
             if candidate.get('plan', {}).get('infrastructure'):
-                infrastructure_snapshot = reconcile_infrastructure(environment, combined)
-            for name in ('cms', 'frontend', 'gateway'):
+                infrastructure_snapshot = reconcile_infrastructure(environment, combined, cms_strategy=cms_strategy, monitor=monitor)
+            names = ('frontend', 'cms', 'gateway') if cms_strategy == 'Recreate' else ('cms', 'frontend', 'gateway')
+            for name in names:
                 if name in changed:
-                    if not infrastructure_snapshot:
-                        patch_component(environment, name, changed[name])
-                    verify_components(environment, {name: changed[name]}, evidence=report.setdefault('componentVerification', []))
+                    with observe_cms_transition(monitor if name == 'cms' and not infrastructure_snapshot else None, cms_strategy if name == 'cms' and not infrastructure_snapshot else 'RollingUpdate', environment):
+                        if not infrastructure_snapshot:
+                            if name == 'cms':
+                                patch_component(environment, name, changed[name], cms_strategy=cms_strategy)
+                            else:
+                                patch_component(environment, name, changed[name])
+                        verify_components(environment, {name: changed[name]}, evidence=report.setdefault('componentVerification', []))
             verify_components(environment, combined, evidence=report.setdefault('componentVerification', []))
             if environment == 'staging':
                 verify_components(environment, {'gateway': combined['frontend']})
             command(['node', str(recipe), environment], timeout=600)
             if monitor:
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline:
-                    monitor.require_available()
-                    time.sleep(1)
+                monitor.wait_for_continuous_health(seconds=60)
                 report['monitoringAfter'] = prometheus_proof()
                 monitor.require_available()
                 monitor.stop.set()
                 monitor.thread.join(timeout=5)
                 if monitor.thread.is_alive() or monitor.expired or monitor.errors or monitor.samples < 3:
                     raise RuntimeError('Origin observation did not finish healthy')
-                report['originObservation'] = {'samples': monitor.samples, 'errors': [], 'expired': False}
+                report['originObservation'] = monitor.proof()
             report.update(status='success', finishedAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
             save_json(root / (environment + '.json'), report)
         except Exception as error:
@@ -541,7 +592,7 @@ def activate(root, environment, candidate, recipe):
             if monitor:
                 monitor.stop.set()
                 monitor.thread.join(timeout=5)
-                report['originObservation'] = {'samples': monitor.samples, 'errors': monitor.errors, 'expired': monitor.expired}
+                report['originObservation'] = monitor.proof()
                 save_json(root / 'history' / (str(time.time_ns()) + '-origin-samples.json'), monitor.records)
             save_json(root / 'history' / (str(time.time_ns()) + '-' + environment + '.json'), report)
 
