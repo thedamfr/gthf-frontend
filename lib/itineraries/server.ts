@@ -84,7 +84,7 @@ async function requestStrapiJson<T>(
     revalidate: 'next' in policy ? policy.next.revalidate : 0,
     maximumBytes: STRAPI_RESPONSE_LIMIT_BYTES,
     validate: (value) => requestKind === 'feature-switch'
-      ? typeof (value as { data?: { publishCityItinerariesToNext?: unknown } }).data?.publishCityItinerariesToNext === 'boolean'
+      ? (value as { data?: unknown }).data === null || typeof (value as { data?: { publishCityItinerariesToNext?: unknown } }).data?.publishCityItinerariesToNext === 'boolean'
       : Array.isArray((value as { data?: unknown }).data),
   });
 }
@@ -396,6 +396,7 @@ export async function getGuardedItineraryBySlug(
 
 async function getRedirectTargetSlug(oldSlug: string): Promise<string | null> {
   const query = new URLSearchParams({
+    status: 'published',
     'filters[oldSlug][$eq]': oldSlug,
     'filters[enabled][$eq]': 'true',
     'fields[0]': 'oldSlug',

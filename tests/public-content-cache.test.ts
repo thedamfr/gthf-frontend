@@ -115,3 +115,33 @@ test('the timeout aborts a real stalled response body, not just receipt of heade
     assert.ok(Date.now() - started < 1000);
   } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
+
+test('a first alias read revokes superseded projections while preserving unrelated and unchanged documents', async () => {
+  let now = 0;
+  const cache = new PublicContentCache(8192, () => now);
+  const options = { public: true, revalidate: 60, cache };
+  const old = { documentId: 'article-one', slug: 'one', title: 'Old publication', updatedAt: '2026-10-13T20:00:00Z' };
+  const one = url + '&filters[slug][$eq]=one';
+  const other = url + '&filters[slug][$eq]=other';
+  const offline: typeof fetch = async () => { throw new Error('offline'); };
+  await readCmsJson(url, { ...options, fetchImpl: async () => Response.json({ data: [old] }) });
+  await readCmsJson(other, { ...options, fetchImpl: async () => Response.json({ data: [{ documentId: 'article-two', slug: 'other', title: 'Unrelated' }] }) });
+  await readCmsJson(one, { ...options, fetchImpl: async () => Response.json({ data: [{ ...old, blocks: [{ body: 'Extra projection' }] }] }) });
+  assert.deepEqual(await readCmsJson(url, { ...options, fetchImpl: offline }), { data: [old] });
+  await readCmsJson(one + '&populate=seo', { ...options, fetchImpl: async () => Response.json({ data: [{ ...old, title: 'Confirmed replacement', updatedAt: '2026-10-13T21:00:00Z' }] }) });
+  now = 61_000;
+  await assert.rejects(readCmsJson(url, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+  await assert.rejects(readCmsJson(one, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+  assert.equal((await readCmsJson<{ data: { title: string }[] }>(other, { ...options, fetchImpl: offline })).data[0].title, 'Unrelated');
+});
+
+test('an explicitly absent published global closes a previously open feature through an outage', async () => {
+  const cache = new PublicContentCache();
+  const flag = 'http://cms.test/api/global?status=published&fields[0]=publishCityItinerariesToNext';
+  const options = { public: true, revalidate: 0, cache,
+    validate: (value: unknown) => (value as { data?: unknown }).data === null
+      || typeof (value as { data?: { publishCityItinerariesToNext?: unknown } }).data?.publishCityItinerariesToNext === 'boolean' };
+  await readCmsJson(flag, { ...options, fetchImpl: async () => Response.json({ data: { publishCityItinerariesToNext: true } }) });
+  assert.deepEqual(await readCmsJson(flag, { ...options, fetchImpl: async () => Response.json({ data: null }) }), { data: null });
+  assert.deepEqual(await readCmsJson(flag, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), { data: null });
+});

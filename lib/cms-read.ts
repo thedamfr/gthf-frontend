@@ -17,6 +17,35 @@ export interface CmsReadOptions {
   validate?: (value: unknown) => boolean;
 }
 
+function records(value: unknown): Record<string, unknown>[] {
+  const data = (value as { data: unknown }).data;
+  return (Array.isArray(data) ? data : [data]).filter((record): record is Record<string, unknown> =>
+    record !== null && typeof record === 'object' && !Array.isArray(record));
+}
+
+function recordTags(record: Record<string, unknown>): string[] {
+  return ['documentId', 'slug', 'id'].flatMap((field) => field in record ? [`${field}:${String(record[field])}`] : []);
+}
+
+function sharedFieldsDiffer(previous: unknown, current: unknown): boolean {
+  if (previous === null || current === null || typeof previous !== 'object' || typeof current !== 'object') return previous !== current;
+  if (Array.isArray(previous) || Array.isArray(current)) {
+    return !Array.isArray(previous) || !Array.isArray(current) || previous.length !== current.length
+      || previous.some((value, index) => sharedFieldsDiffer(value, current[index]));
+  }
+  return Object.keys(previous).some((key) => key in current
+    && sharedFieldsDiffer((previous as Record<string, unknown>)[key], (current as Record<string, unknown>)[key]));
+}
+
+function changedEntityTags(previous: unknown, current: unknown): string[] {
+  const currentRecords = records(current);
+  return records(previous).flatMap((record) => {
+    const tags = recordTags(record);
+    const replacement = currentRecords.find((candidate) => recordTags(candidate).some((tag) => tags.includes(tag)));
+    return replacement && sharedFieldsDiffer(record, replacement) ? [...tags, ...recordTags(replacement)] : [];
+  });
+}
+
 /** Cache only validated published JSON; Next's fetch revalidation never owns this timeout. */
 export async function readCmsJson<T>(url: string, options: CmsReadOptions): Promise<T> {
   const parsed = new URL(url);
@@ -48,15 +77,10 @@ export async function readCmsJson<T>(url: string, options: CmsReadOptions): Prom
     }
   };
   if (!options.public) return load();
-  const entityTags = (value: T): string[] => {
-    const data = (value as { data: unknown }).data;
-    return (Array.isArray(data) ? data : [data]).flatMap((record) => {
-      if (!record || typeof record !== 'object') return [];
-      return ['documentId', 'slug', 'id'].flatMap((field) => field in record ? [`${field}:${String(record[field])}`] : []);
-    });
-  };
+  const entityTags = (value: T): string[] => records(value).flatMap(recordTags);
   return (options.cache ?? publicCache).read({ key, scope, ttlMs: options.revalidate * 1000, load,
     tags: parsed.pathname === '/api/global' ? undefined : entityTags,
+    changedTags: parsed.pathname === '/api/global' ? undefined : changedEntityTags,
     revokedTags: (value) => {
       const data = (value as { data: unknown }).data;
       if (data !== null && (!Array.isArray(data) || data.length !== 0)) return [];

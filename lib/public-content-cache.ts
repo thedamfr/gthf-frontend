@@ -18,6 +18,7 @@ interface LoadOptions<T> {
   load: () => Promise<T>;
   tags?: (value: T) => string[];
   revokedTags?: (value: T) => string[];
+  changedTags?: (previous: T, value: T) => string[];
 }
 
 export class PublicContentCache {
@@ -78,6 +79,15 @@ export class PublicContentCache {
     if (previous && previous.serialized !== serialized) {
       this.invalidate(options.scope, options.tags ? [...previous.tags, ...tags] : undefined);
     }
+    // A first read through a different projection can confirm a newer version
+    // of an already cached document. Compare shared fields, not whole payloads.
+    const superseded = new Set<string>();
+    for (const entry of this.entries.values()) {
+      if (entry.scope === options.scope) {
+        for (const tag of options.changedTags?.(entry.value as T, value) ?? []) superseded.add(tag);
+      }
+    }
+    if (superseded.size) this.invalidate(options.scope, [...superseded]);
     const revoked = options.revokedTags?.(value) ?? [];
     if (revoked.length) this.invalidate(options.scope, revoked);
     const existing = this.entries.get(options.key);

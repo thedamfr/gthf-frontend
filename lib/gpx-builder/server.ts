@@ -43,7 +43,7 @@ async function requestStrapiJson<T>(
     token, public: true, revalidate: 'next' in policy ? policy.next.revalidate : 0,
     maximumBytes: STRAPI_RESPONSE_LIMIT_BYTES,
     validate: (value) => requestKind === 'feature-switch'
-      ? typeof (value as { data?: { gpxBuilderEnabled?: unknown } }).data?.gpxBuilderEnabled === 'boolean'
+      ? (value as { data?: unknown }).data === null || typeof (value as { data?: { gpxBuilderEnabled?: unknown } }).data?.gpxBuilderEnabled === 'boolean'
       : Array.isArray((value as { data?: unknown }).data),
   });
 }
