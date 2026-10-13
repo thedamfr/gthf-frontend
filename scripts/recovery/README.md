@@ -98,6 +98,18 @@ Toutes les phases exigent le checkout propre à la révision du manifeste.
 premier build de la campagne ; les builds applicatifs suivants les réutilisent
 après vérification d’identité et de checksum, sans changer les dépendances durables.
 
+Avant livraison, reprendre `infra:recovery:images` avec les deux options
+`--published-cms /CHEMIN-CAMPAGNE/candidate-cms.json` et
+`--published-frontend /CHEMIN-CAMPAGNE/candidate-frontend.json` : ce sont les
+publications privées copiées depuis les branches GitHub `gthf-release`, avec les
+checkouts aux SHA exacts de main. Le contrôleur vérifie les workflows main
+réussis, le déployeur commun, les noms GHCR, les digests et labels de révision,
+puis importe ces images sans les reconstruire. Le manifeste obtenu porte le
+suffixe `-published` et les références CI. Ces digests sont ceux à requalifier
+avant staging et production. Suspendre le réconciliateur durant cette étape.
+Les fixtures d’une tentative échouée restent conservées ; chaque nouvelle
+publication interrompue reçoit un slug propre à la tentative.
+
 ### Identité, preuves et nettoyage
 
 Le namespace invité est toujours `gthf-recovery`. La base et le bucket dérivent

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { requireRegularPath, validateManifest, verifyReservation } from '../scripts/recovery/manifest.mjs';
+import { publishedImage, requireRegularPath, validateManifest, verifyReservation } from '../scripts/recovery/manifest.mjs';
 import { verifyImages } from '../scripts/recovery/prepare-vm.mjs';
 import { COMPONENTS } from '../scripts/recovery/profile.mjs';
 
@@ -22,6 +22,20 @@ function fixture() {
   };
 }
 const options = { target: 'vm', infraRevision: revision };
+test('published recovery refuses a foreign image, source revision or deployer before any registry pull', () => {
+  const image = 'ghcr.io/thedamfr/gthf-cms@sha256:' + 'b'.repeat(64);
+  const candidate = { publication: { component: 'cms', repository: 'thedamfr/gthf-cms', revision }, deployerRevision: revision,
+    components: { cms: { image, revision, processedRevision: revision } } };
+  assert.equal(publishedImage(candidate, 'cms', revision, revision), image);
+  for (const change of [
+    (value: typeof candidate) => { value.components.cms.image = image.replace('gthf-cms', 'foreign'); },
+    (value: typeof candidate) => { value.components.cms.image = 'ghcr.io/thedamfr/gthf-cms:latest'; },
+    (value: typeof candidate) => { value.components.cms.revision = 'c'.repeat(40); },
+    (value: typeof candidate) => { value.publication.revision = 'c'.repeat(40); },
+    (value: typeof candidate) => { value.deployerRevision = 'c'.repeat(40); },
+    (value: typeof candidate) => { value.publication.repository = 'thedamfr/other'; },
+  ]) { const value = structuredClone(candidate); change(value); assert.throws(() => publishedImage(value, 'cms', revision, revision)); }
+});
 test('recovery refuses an unknown target, production configuration and unpinned artifacts', () => {
   assert.doesNotThrow(() => validateManifest(fixture(), options));
   assert.throws(() => validateManifest(fixture(), { ...options, target: 'production' }));

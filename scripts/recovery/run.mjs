@@ -33,6 +33,7 @@ try {
   }
   success = true;
 } catch (error) {
+  writeFileSync(join(attempt, 'private-error.log'), String(error.stack ?? error), { mode: 0o600 });
   if (error.privateResult) writeFileSync(join(attempt, 'private-failure.log'), error.privateResult.stderr, { mode: 0o600 });
   console.error('Recovery ' + values.phase + ' failed: ' + error.message);
   process.exitCode = 1;

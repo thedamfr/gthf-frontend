@@ -344,8 +344,9 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     return { key, objects: objects.length, remainingBeforeKill, cleanupTaskRemovedAfterResume: true, referenceRemovedBeforeCleanup: true, deleteReplayUnique: true };
   }
   async interruptedPublication() {
+    const slug = 'recovery-interrupted-' + randomUUID();
     const created = await this.admin(MODEL, { method: 'POST', json: {
-      title: 'Brouillon acquitté avant interruption', slug: 'recovery-interrupted-publication', description: 'Qualification de la transaction.',
+      title: 'Brouillon acquitté avant interruption', slug, description: 'Qualification de la transaction.',
       author: { connect: [{ documentId: (await this.request('cms', '/api/authors', { token: this.credentials.STRAPI_API_TOKEN }).then((response) => response.json())).data[0].documentId }] },
       category: { connect: [{ documentId: (await this.request('cms', '/api/categories', { token: this.credentials.STRAPI_API_TOKEN }).then((response) => response.json())).data[0].documentId }] },
     } });
@@ -360,11 +361,11 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
       await lock; await this.applications();
       const draft = await this.admin(MODEL + '/' + documentId + '?status=draft');
       assert.equal((draft.data ?? draft).title, 'Brouillon acquitté avant interruption');
-      const published = await (await this.request('cms', '/api/articles?status=published&filters[slug][$eq]=recovery-interrupted-publication', { token: this.credentials.STRAPI_API_TOKEN })).json();
+      const published = await (await this.request('cms', '/api/articles?status=published&filters[slug][$eq]=' + slug, { token: this.credentials.STRAPI_API_TOKEN })).json();
       assert.equal(published.data.length, 0, 'Interrupted publication must not expose the draft');
     }
     await this.admin(MODEL + '/' + documentId + '/actions/publish', { method: 'POST', json: {} });
-    const published = await (await this.request('cms', '/api/articles?status=published&filters[slug][$eq]=recovery-interrupted-publication', { token: this.credentials.STRAPI_API_TOKEN })).json();
+    const published = await (await this.request('cms', '/api/articles?status=published&filters[slug][$eq]=' + slug, { token: this.credentials.STRAPI_API_TOKEN })).json();
     assert.equal(published.data.length, 1);
     return { interruptedEditRolledBack: true, interruptedPublicationHidden: true, retryPublishedExactlyOnce: true };
   }
@@ -430,7 +431,21 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
       const page = await (await this.request(frontend, '/article/recovery-published')).text();
       assert.ok(page.includes(this.acknowledgedTitle));
     }
-    return { warmPublicRoutes: routes.length, realCacheExpiryWaitMs: 301000, previousMediaRetainedPastCacheTtl: true, coldTemporaryError: cold.status, previewBypassedCache: true, frozenProcessRestarted: true, rtoMs };
+    // Both processes now hold the old publication. A fresh acknowledged update
+    // must replace those warm representations after the dependency returns.
+    this.acknowledgedTitle = 'Publication après reprise ' + randomUUID();
+    await this.admin(MODEL + '/' + this.fixtures.article, { method: 'PUT', json: { title: this.acknowledgedTitle } });
+    await this.admin(MODEL + '/' + this.fixtures.article + '/actions/publish', { method: 'POST', json: {} });
+    const publishedAt = Date.now();
+    await this.eventually('Both warm caches converge to the new acknowledged publication', async () => {
+      for (const frontend of ['frontendA', 'frontendB']) {
+        const response = await this.request(frontend, '/article/recovery-published');
+        if (!(await response.text()).includes(this.acknowledgedTitle)) return false;
+      }
+      return true;
+    }, { timeout: 90000 });
+    await this.assertArticle();
+    return { warmPublicRoutes: routes.length, realCacheExpiryWaitMs: 301000, previousMediaRetainedPastCacheTtl: true, coldTemporaryError: cold.status, previewBypassedCache: true, frozenProcessRestarted: true, rtoMs, publicationConvergenceMs: Date.now() - publishedAt };
   }
   async revocation() {
     await this.request('frontendA', '/article/recovery-published');

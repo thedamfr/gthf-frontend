@@ -87,3 +87,17 @@ export function verifyReservation(manifest, status) {
   assert.equal(status.hostname, manifest.vm.hostname, 'Guest identity mismatch');
   return status;
 }
+
+export function publishedImage(candidate, component, revision, deployerRevision) {
+  assert.ok(['cms', 'frontend'].includes(component));
+  assert.match(revision, sha); assert.match(deployerRevision, sha);
+  assert.equal(candidate.publication.component, component);
+  assert.equal(candidate.publication.repository, 'thedamfr/gthf-' + component);
+  assert.equal(candidate.publication.revision, revision);
+  assert.equal(candidate.deployerRevision, deployerRevision);
+  const image = candidate.components[component];
+  assert.equal(image.processedRevision, revision);
+  assert.equal(image.revision, revision, 'Recovery qualifies the exact image source revision');
+  assert.match(image.image, new RegExp('^ghcr\\.io/thedamfr/gthf-' + component + '@sha256:[a-f0-9]{64}$'));
+  return image.image;
+}

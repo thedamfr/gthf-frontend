@@ -5,10 +5,13 @@ import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileS
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { EVIDENCE_ROOT, GUEST_ROOT, NAMESPACE, requireRegularPath, validateManifest } from './manifest.mjs';
+import { EVIDENCE_ROOT, GUEST_ROOT, NAMESPACE, publishedImage, requireRegularPath, validateManifest } from './manifest.mjs';
 import { infrastructureLock } from './infra-client.mjs';
+import { readBoundedJson, requirePublication } from '../../infrastructure/delivery/publication.mjs';
 
-const { values } = parseArgs({ options: { 'run-id': { type: 'string' }, uuid: { type: 'string' }, 'cms-source': { type: 'string' } }, strict: true });
+const { values } = parseArgs({ options: { 'run-id': { type: 'string' }, uuid: { type: 'string' }, 'cms-source': { type: 'string' }, 'published-cms': { type: 'string' }, 'published-frontend': { type: 'string' } }, strict: true });
+assert.equal(Boolean(values['published-cms']), Boolean(values['published-frontend']), 'Both exact CI candidates must be supplied together');
+const published = Boolean(values['published-cms']);
 assert.match(values['run-id'] ?? '', /^gthf-recovery-[a-z0-9-]{1,64}$/);
 assert.match(values.uuid ?? '', /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
 assert.notEqual(infrastructureLock.revision, '0'.repeat(40), 'Infrastructure revision must be reviewed and pinned');
@@ -24,7 +27,8 @@ for (const [component, source] of [['cms', cms], ['frontend', front]]) {
   assert.equal(git(source, 'status', '--porcelain', '--untracked-files=normal'), '', 'Candidate must be committed and clean: ' + component);
   revisions[component] = git(source, 'rev-parse', 'HEAD');
 }
-const artifacts = join(root, 'images-' + revisions.cms.slice(0, 12) + '-' + revisions.frontend.slice(0, 12));
+const suffix = published ? '-published' : '';
+const artifacts = join(root, 'images-' + revisions.cms.slice(0, 12) + '-' + revisions.frontend.slice(0, 12) + suffix);
 mkdirSync(artifacts, { mode: 0o700 });
 async function command(name, argv, cwd) {
   const log = openSync(join(artifacts, name + '.log'), 'wx', 0o600);
@@ -43,7 +47,8 @@ async function checksum(path) {
 }
 function inspect(ref, revision) {
   const data = JSON.parse(execFileSync('sudo', ['-n', 'docker', 'image', 'inspect', ref], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }))[0];
-  const reference = data.RepoDigests?.find((item) => item.startsWith(ref.split(':')[0] + '@')) ?? data.RepoDigests?.[0];
+  const reference = ref.includes('@') ? data.RepoDigests?.find((item) => item === ref)
+    : data.RepoDigests?.find((item) => item.startsWith(ref.split(':')[0] + '@'));
   assert.ok(reference?.includes('@sha256:'), 'Built image must have an immutable repository digest');
   if (revision) assert.equal(data.Config.Labels['org.opencontainers.image.revision'], revision);
   return { ref: reference, digest: reference.split('@')[1], imageId: data.Id, ...(revision ? { revision } : {}) };
@@ -75,10 +80,27 @@ for (const [component, source] of [['cms', cms], ['frontend', front]]) {
   execFileSync('tar', ['--extract', '--file=' + archive, '--directory=' + directory]);
   frozen[component] = directory;
 }
+const publications = {};
 for (const component of ['cms', 'frontend']) {
-  const tag = 'gthf-' + component + ':recovery-' + revisions[component];
-  await command('build-' + component, ['sudo', '-n', 'docker', 'buildx', 'build', '--load', '--tag', tag, '--build-arg', 'GTHF_REVISION=' + revisions[component], '.'], frozen[component]);
-  images[component] = inspect(tag, revisions[component]);
+  if (published) {
+    const path = requireRegularPath(values['published-' + component], { privateFile: true });
+    assert.equal(dirname(path), root, 'Publication proof must belong to this campaign');
+    assert.ok(statSync(path).size <= 262144);
+    const candidate = JSON.parse(readFileSync(path, 'utf8'));
+    const reference = publishedImage(candidate, component, revisions[component], revisions.frontend);
+    const response = await fetch('https://api.github.com/repos/thedamfr/gthf-' + component + '/actions/runs/' + candidate.publication.runId,
+      { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'gthf-recovery-qualification' }, redirect: 'error', signal: AbortSignal.timeout(20000) });
+    assert.ok(response.ok, 'Exact candidate CI proof is unavailable');
+    const workflow = await readBoundedJson(response);
+    requirePublication(candidate.publication, workflow, component);
+    publications[component] = { ...candidate.publication, candidateSha256: await checksum(path), workflowUrl: workflow.html_url };
+    await command('pull-' + component, ['sudo', '-n', 'docker', 'pull', reference]);
+    images[component] = inspect(reference, revisions[component]);
+  } else {
+    const tag = 'gthf-' + component + ':recovery-' + revisions[component];
+    await command('build-' + component, ['sudo', '-n', 'docker', 'buildx', 'build', '--load', '--tag', tag, '--build-arg', 'GTHF_REVISION=' + revisions[component], '.'], frozen[component]);
+    images[component] = inspect(tag, revisions[component]);
+  }
 }
 if (!dependencies) {
   images.postgres = inspect('gthf-postgres@sha256:350a73c4b179649dbf542a425f01e37e24d3129432c61a9fd86b7675d924a1b0');
@@ -108,14 +130,14 @@ const manifest = validateManifest({ schemaVersion: 1, target: 'vm', namespace: N
   vm: { uuid: values.uuid, host: 'game-prod-ovh-gra', hostname: 'infra-qualification-vm', service: 'infra-qualification-vm.service', microk8sVersion: '1.35.6', microk8sRevision: '9072' },
   guestRoot: GUEST_ROOT, database: 'gthf_recovery_' + values.uuid.replaceAll('-', ''), bucket: 'gthf-recovery-' + values.uuid,
   sourceRevisions: { ...revisions, infra: infrastructureLock.revision }, images, archives,
-  builtAt: new Date().toISOString(),
+  builtAt: new Date().toISOString(), ...(published ? { publications } : {}),
 }, { target: 'vm', infraRevision: infrastructureLock.revision });
 if (!dependencies) {
   writeFileSync(dependencyPath, JSON.stringify({ schemaVersion: 1, runId: values['run-id'], vmUuid: values.uuid,
     images: { postgres: images.postgres, minio: images.minio }, archives: { postgres: archives.postgres, minio: archives.minio },
   }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
 }
-const path = join(root, 'manifest-' + revisions.cms.slice(0, 12) + '-' + revisions.frontend.slice(0, 12) + '.json');
+const path = join(root, 'manifest-' + revisions.cms.slice(0, 12) + '-' + revisions.frontend.slice(0, 12) + suffix + '.json');
 assert.ok(!existsSync(path), 'A previous campaign manifest is never overwritten');
 writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
 console.log(JSON.stringify({ status: 'images-prepared', manifest: path, revisions: manifest.sourceRevisions, images }));
