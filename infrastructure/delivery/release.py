@@ -431,7 +431,10 @@ def reconcile_infrastructure(environment, components):
     return previous
 
 
-def restore_infrastructure(environment, resources):
+def restore_infrastructure(environment, resources, evidence=None):
+    for kind, name, previous in resources:
+        if kind == 'Deployment' and name == 'gthf-cms':
+            require_cms_rollback(environment, previous, evidence=evidence)
     for kind, name, previous in reversed(resources):
         if previous is None:
             kubectl(environment, 'delete', kind, name, '--ignore-not-found')
@@ -440,6 +443,17 @@ def restore_infrastructure(environment, resources):
             for key in ('resourceVersion', 'uid', 'creationTimestamp', 'managedFields', 'generation'):
                 previous['metadata'].pop(key, None)
             kubectl(environment, 'apply', '-f', '-', data=json.dumps(previous).encode())
+
+
+def require_cms_rollback(environment, deployment, evidence=None):
+    from media_rollback import require_media_rollback
+    proof = evidence if evidence is not None else {}
+    try:
+        require_media_rollback(environment, deployment, kubectl, command, proof)
+    except Exception as error:
+        error.media_rollback = proof
+        raise
+    return proof
 
 
 def activate(root, environment, candidate, recipe):
@@ -505,10 +519,15 @@ def activate(root, environment, candidate, recipe):
                 report['originObservation'] = {'samples': monitor.samples, 'errors': [], 'expired': False}
             report.update(status='success', finishedAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
             save_json(root / (environment + '.json'), report)
-        except Exception:
+        except Exception as error:
             report['status'] = 'failed'
+            if hasattr(error, 'media_rollback'):
+                report['mediaRollback'] = error.media_rollback
+            if 'cms' in snapshots:
+                report['mediaRollback'] = {}
+                require_cms_rollback(environment, snapshots['cms'], evidence=report['mediaRollback'])
             if infrastructure_snapshot:
-                restore_infrastructure(environment, infrastructure_snapshot)
+                restore_infrastructure(environment, infrastructure_snapshot, evidence=report.setdefault('mediaRollback', {}))
             # The schema compatibility check permits keeping additive columns during rollback.
             for name in reversed(('cms', 'frontend', 'gateway')):
                 if name in snapshots:

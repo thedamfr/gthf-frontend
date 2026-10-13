@@ -42,6 +42,13 @@ images et labels OCI exacts, puis attend au plus 90 secondes la fin des anciens
 processus et la révision publique attendue. Une mauvaise image échoue directement.
 Les observations intermédiaires sont conservées dans le rapport privé.
 
+Un journal média existant interdit le rollback automatique vers un ancien CMS
+sans capacité de reprise attestée, même avec zéro opération en attente. La
+lecture PostgreSQL doit réussir et l'image cible doit porter le label OCI
+`io.gthf.media-recovery=1` à la révision attendue. Sinon la livraison échoue en
+conservant l'image actuelle et les journaux ; une intervention compatible est
+nécessaire.
+
 Ce jalon traite la reprise de l'issue #39 et la convergence de l'issue #42. Il
 ne valide ni 1 000 visiteurs simultanés, ni un HPA, ni deux réplicas permanents
 en production. La campagne isolée utilise deux instances pour vérifier les
@@ -72,3 +79,17 @@ validée. Dès qu'un retrait est confirmé sur cette instance, les anciennes
 réponses concernées ne sont plus réutilisées, y compris par une lecture déjà
 en cours. Les autres instances apprennent le changement à leur prochaine
 revalidation. Aucun contenu privé ou draft n'est accepté dans le cache public.
+
+### Retour arrière et intentions médias
+
+Les deux chemins de rollback (composants et infrastructure) contrôlent les
+tables `gthf_media_operations` et `gthf_media_cleanup` avant toute restauration
+susceptible de remplacer le CMS. Les comptes `preparing`, `prepared`,
+`interrupted` et `cleanupPending` sont conservés dans la preuve privée. Une
+absence de tables autorise l'ancien CMS ; des tables partielles, des états
+inconnus ou une lecture DB impossible bloquent le rollback. Des tables présentes
+exigent toujours un worker compatible : un compte nul ne constitue pas une
+barrière empêchant un nouvel upload entre le contrôle et le changement d'image.
+Les références d'image, le digest de configuration et le label de révision OCI
+sont vérifiés avant d'accepter la capacité de reprise v1. Aucune table, intention
+ou donnée média n'est supprimée par ce contrôle.
