@@ -8,7 +8,9 @@ import { uploadPng } from '../../infrastructure/delivery/upload-fixture.mjs';
 import { GUEST_ROOT, requireRegularPath } from './manifest.mjs';
 import { COMPONENTS, PORTS, LOCAL_PORTS } from './profile.mjs';
 import { verifyImages } from './prepare-vm.mjs';
+import { withCmsPartition } from './network-partition.mjs';
 import { injectInterruptedMedia } from './late-put.mjs';
+import { withUrlFixture } from './url-fixture.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -235,6 +237,70 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     this.acknowledged.push({ key, media });
     return { publicationPersisted: true, receiptOwnerVerified: true, currentRightsRechecked: true, retryUnique: true };
   }
+  async interruptedUrlImport() {
+    const sourceKey = randomUUID();
+    const source = await this.assertMedia(await this.upload(sourceKey, { bytes: uploadPng, name: 'url-source.png' }));
+    const prefix = '/' + this.bench.manifest.bucket + '/';
+    const sourcePath = new URL(source.url).pathname; assert.ok(sourcePath.startsWith(prefix));
+    const object = (await this.operationObjects(sourceKey)).find((item) => item.key === sourcePath.slice(prefix.length));
+    assert.ok(object, 'The URL source must be an acknowledged, checksummed campaign object');
+    const key = randomUUID();
+    const urlFileCount = async () => {
+      const result = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database,
+        '-tA', '-v', 'ON_ERROR_STOP=1', '-c', "SELECT count(*) FROM files WHERE provider_metadata->>'gthfOperation'='" + key + "'"]);
+      return Number(result.stdout.toString().trim());
+    };
+    const stream = async (body) => {
+      const response = await this.request('cms', '/upload/actions/upload-from-urls', { method: 'POST', token: this.adminToken, json: body, timeout: 120000 });
+      assert.ok(response.headers.get('content-type')?.includes('text/event-stream'));
+      const text = await response.text();
+      return text.split('\n\n').filter(Boolean).map((block) => {
+        const lines = block.split('\n');
+        const event = lines.find((line) => line.startsWith('event: '))?.slice(7);
+        const data = lines.find((line) => line.startsWith('data: '))?.slice(6);
+        assert.ok(event && data); return { event, data: JSON.parse(data) };
+      });
+    };
+    const recovered = await withUrlFixture(this.bench, object, async ({ url }) => {
+      const payload = { urls: [url], folderId: null, operationKeys: [key] };
+      const legacy = await this.request('cms', '/upload/actions/upload-from-urls', { method: 'POST', token: this.adminToken,
+        json: { urls: [url], folderId: null }, allow: [409] });
+      assert.equal(legacy.status, 409); assert.equal((await legacy.json()).error.name, 'ADMIN_RELOAD_REQUIRED');
+      await this.gate('before-commit', key);
+      const pending = stream(payload).then((events) => events.some((item) => item.event === 'stream:complete'), () => false);
+      await this.observed('before-commit', key);
+      const receipt = await this.admin('/upload/recovery/operations/' + key);
+      assert.equal(receipt.kind, 'upload'); assert.equal(receipt.status, 'pending'); assert.equal(receipt.result, undefined);
+      assert.equal(await urlFileCount(), 0, 'The streamed URL must have no file before its SQL commit');
+      const objects = await this.operationObjects(key); await this.assertObjects(objects);
+      const interruptedAt = Date.now(); await this.signal('cms');
+      assert.equal(await pending, false, 'The killed URL stream must not acknowledge a completed import');
+      await this.applications();
+      const committed = (await this.receipt(key, 'committed')).value;
+      const rtoMs = Date.now() - interruptedAt; assert.ok(rtoMs <= DEADLINE);
+      const media = await this.assertMedia(committed.result);
+      assert.equal(await urlFileCount(), 1); assert.equal(await this.operationCount(key), 1);
+      await this.assertObjects(objects); await this.assertMedia(source);
+      return { payload, media, rtoMs };
+    });
+    // withUrlFixture has now removed the only reachable source endpoint. A
+    // committed replay must use its receipt without fetching that source again.
+    const events = await stream(recovered.payload);
+    const completed = events.filter((item) => item.event === 'file:complete');
+    assert.equal(completed.length, 1); assert.equal(completed[0].data.operationKey, key);
+    assert.equal(completed[0].data.replayed, true); assert.equal(completed[0].data.file.id, recovered.media.id);
+    const summary = events.filter((item) => item.event === 'stream:complete'); assert.equal(summary.length, 1);
+    assert.equal(summary[0].data.data.length, 1); assert.equal(summary[0].data.data[0].id, recovered.media.id); assert.deepEqual(summary[0].data.errors, []);
+    assert.equal(await urlFileCount(), 1); assert.equal(await this.operationCount(key), 1);
+    assert.equal((await this.request('cms', '/upload/recovery/operations/' + key, { token: this.otherToken, allow: [404] })).status, 404);
+    assert.equal((await this.request('cms', '/upload/actions/upload-from-urls', { method: 'POST', token: this.otherToken, json: recovered.payload, allow: [404] })).status, 404);
+    const changed = await this.request('cms', '/upload/actions/upload-from-urls', { method: 'POST', token: this.adminToken,
+      json: { ...recovered.payload, urls: [recovered.payload.urls[0] + '?changed=1'] }, allow: [409] });
+    assert.equal(changed.status, 409); assert.equal((await changed.json()).error.name, 'IDEMPOTENCY_CONFLICT');
+    return { key, mediaId: recovered.media.id, rtoMs: recovered.rtoMs, realCmsSigkill: true, preparedObjectsPersisted: true,
+      uniqueReceiptAndFile: true, receiptOwnerVerified: true, changedSourceRefused: true, sourceFixtureRemovedBeforeReplay: true,
+      replayWithoutSourceFetch: true, sourceMediaPreserved: true, sourceScope: 'synthetic VM HTTP source with original Strapi SSRF checks' };
+  }
   async interruptedUpload() {
     const key = randomUUID(); await this.gate('after-journal', key);
     const request = this.upload(key).then(() => ({ succeeded: true }), () => ({ succeeded: false }));
@@ -388,8 +454,9 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     const replay = await this.assertMedia(await this.upload(key, { id: original.id })); assert.equal(replay.id, original.id); assert.equal(replay.url, replaced.url);
     assert.equal(await this.operationCount(key), 1); await this.assertArticle();
     await this.assertMedia(original, { width: 1200, height: 800 });
-    const retention = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-c', "SELECT extract(epoch from(c.not_before-o.updated_at))*1000 FROM gthf_media_cleanup c JOIN gthf_media_operations o ON o.key=c.operation_key WHERE o.key='" + key + "'"]);
-    assert.ok(Number(retention.stdout.toString().trim()) >= 600000, 'The durable cleanup schedule must retain objects for the real public cache TTLs');
+    const retained = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-v', 'ON_ERROR_STOP=1', '-c', "SELECT count(*) FROM gthf_media_cleanup WHERE operation_key='" + key + "' AND retain_file_id=" + original.id + " AND state='pending' AND recurring=false AND lease_owner IS NULL"]);
+    assert.equal(Number(retained.stdout.toString().trim()), 1, 'Replacement history must be held by the existing logical file');
+    this.replacementHistory = { id: original.id, versions: [original, replaced] };
     for (const object of [original, ...Object.values(original.formats)]) this.obsoleteMedia.push({ url: object.url, replacedAt: Date.now() });
     return { key, rtoMs, immutableReplacement: true, lostResponseReplayed: true };
   }
@@ -413,6 +480,70 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     });
     assert.equal(await this.operationCount(key), 1);
     return { key, objects: objects.length, remainingBeforeKill, cleanupTaskRemovedAfterResume: true, referenceRemovedBeforeCleanup: true, deleteReplayUnique: true };
+  }
+  async interruptedBulkDelete() {
+    const emptyKey = randomUUID();
+    const empty = await this.request('cms', '/upload/actions/bulk-delete', { method: 'POST', token: this.adminToken,
+      headers: { 'Idempotency-Key': emptyKey }, json: { fileIds: [], folderIds: [] }, allow: [400] });
+    assert.equal(empty.status, 400); assert.equal((await empty.json()).error.name, 'INVALID_MEDIA_BATCH');
+    assert.equal((await this.request('cms', '/upload/recovery/operations/' + emptyKey, { token: this.adminToken, allow: [404] })).status, 404);
+    const root = (await this.admin('/upload/folders', { method: 'POST', json: { name: 'recovery-bulk-' + randomUUID() } })).data;
+    assert.ok(Number.isSafeInteger(root?.id));
+    const nested = (await this.admin('/upload/folders', { method: 'POST', json: { name: 'recovery-nested-' + randomUUID(), parent: root.id } })).data;
+    assert.ok(Number.isSafeInteger(nested?.id));
+    const first = await this.assertMedia(await this.upload(randomUUID()));
+    const second = await this.assertMedia(await this.upload(randomUUID(), { fileInfo: { folder: nested.id } }));
+    const files = [first, second];
+    const selection = { fileIds: [first.id], folderIds: [root.id] };
+    const key = randomUUID();
+    const legacy = await this.request('cms', '/upload/actions/bulk-delete', { method: 'POST', token: this.adminToken, json: selection, allow: [409] });
+    assert.equal(legacy.status, 409); assert.equal((await legacy.json()).error.name, 'ADMIN_RELOAD_REQUIRED');
+    await this.gate('after-batch-child', key, 0);
+    const request = this.admin('/upload/actions/bulk-delete', { method: 'POST', headers: { 'Idempotency-Key': key }, json: selection, timeout: 120000 }).then(() => true, () => false);
+    await this.observed('after-batch-child', key);
+    const partial = await this.admin('/upload/recovery/operations/' + key);
+    assert.equal(partial.kind, 'bulk-delete'); assert.equal(partial.status, 'pending'); assert.equal(partial.result, undefined);
+    assert.equal(partial.progress.total, 2); assert.equal(partial.progress.committed, 1);
+    assert.equal(await this.fileCount(first.id), 0); assert.equal(await this.fileCount(second.id), 1);
+    assert.equal((await this.request('cms', '/upload/recovery/operations/' + key, { token: this.otherToken, allow: [404] })).status, 404);
+    assert.equal((await this.request('cms', '/upload/recovery/operations/' + key, { allow: [401] })).status, 401);
+    const conflict = await this.request('cms', '/upload/actions/bulk-delete', { method: 'POST', token: this.adminToken, headers: { 'Idempotency-Key': key }, json: { fileIds: [second.id], folderIds: [] }, allow: [409] });
+    assert.equal(conflict.status, 409); assert.equal((await conflict.json()).error.name, 'IDEMPOTENCY_CONFLICT');
+    const current = await this.admin('/admin/users/me'); const user = current.data ?? current;
+    const originalRoles = user.roles.map((role) => role.id);
+    const roleResponse = await this.admin('/admin/roles', { method: 'POST', token: this.otherToken, json: { name: 'Recovery batch denied ' + randomUUID().slice(0, 8), description: 'Synthetic current-rights check' } });
+    const deniedRole = roleResponse.data ?? roleResponse;
+    try {
+      await this.admin('/admin/users/' + user.id, { method: 'PUT', token: this.otherToken, json: { roles: [deniedRole.id] } });
+      assert.equal((await this.request('cms', '/upload/recovery/operations/' + key, { token: this.adminToken, allow: [403] })).status, 403);
+      assert.equal((await this.request('cms', '/upload/actions/bulk-delete', { method: 'POST', token: this.adminToken, headers: { 'Idempotency-Key': key }, json: selection, allow: [403] })).status, 403);
+    } finally {
+      await this.admin('/admin/users/' + user.id, { method: 'PUT', token: this.otherToken, json: { roles: originalRoles } });
+      await this.login();
+    }
+    const interruptedAt = Date.now(); await this.signal('cms'); assert.equal(await request, false);
+    await this.applications();
+    const receipt = (await this.receipt(key, 'committed')).value;
+    const rtoMs = Date.now() - interruptedAt; assert.ok(rtoMs <= DEADLINE);
+    assert.equal(receipt.progress.total, 2); assert.equal(receipt.progress.committed, 2); assert.equal(receipt.progress.failed, 0);
+    assert.deepEqual(receipt.result.files.map((file) => file.id).sort((a, b) => a - b), files.map((file) => file.id));
+    assert.deepEqual(receipt.result.folders.map((folder) => folder.id), [root.id]);
+    const replay = await this.admin('/upload/actions/bulk-delete', { method: 'POST', headers: { 'Idempotency-Key': key }, json: selection });
+    assert.deepEqual(replay.data, receipt.result);
+    for (const file of files) assert.equal(await this.fileCount(file.id), 0);
+    for (const child of receipt.progress.children) { assert.match(child.key, UUID); assert.equal(await this.operationCount(child.key), 1); }
+    const counts = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-v', 'ON_ERROR_STOP=1', '-c',
+      "SELECT json_build_object('batches',(SELECT count(*) FROM gthf_media_batches WHERE key='" + key + "'),'folders',(SELECT count(*) FROM upload_folders WHERE id IN (" + root.id + ',' + nested.id + ')))']);
+    assert.deepEqual(JSON.parse(counts.stdout.toString()), { batches: 1, folders: 0 });
+    await this.eventually('Objects from both bulk children are removed after resume', async () => {
+      for (const file of files) for (const object of [file, ...Object.values(file.formats ?? {})]) {
+        if ((await this.request('minio', new URL(object.url).pathname, { allow: [404] })).status !== 404) return false;
+      }
+      return true;
+    });
+    await this.assertMedia(this.acknowledged[0].media);
+    return { key, rtoMs, files: 2, folders: 2, partialReceiptHonest: true, ownerPermissionsVerified: true, currentRightsRechecked: true,
+      parentAndChildrenUnique: true, completeReplayAfterLostResponse: true, unrelatedMediaPreserved: true };
   }
   async interruptedPublication() {
     const slug = 'recovery-interrupted-' + randomUUID();
@@ -441,6 +572,19 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     return { interruptedEditRolledBack: true, interruptedPublicationHidden: true, retryPublishedExactlyOnce: true };
   }
   async frontend() {
+    const history = this.replacementHistory;
+    assert.ok(history?.versions.length === 2, 'The replacement Journey must first commit versions A and B');
+    const versionB = history.versions[1];
+    await this.admin(MODEL + '/' + this.fixtures.article, { method: 'PUT', json: { blocks: [
+      { __component: 'shared.rich-text', body: 'Écriture acquittée de la campagne ' + this.bench.manifest.vm.uuid },
+      { __component: 'shared.media', file: history.id },
+    ] } });
+    await this.admin(MODEL + '/' + this.fixtures.article + '/actions/publish', { method: 'POST', json: {} });
+    const containsMedia = (body, media) => body.includes(media.url) || body.includes(encodeURIComponent(media.url));
+    await this.eventually('The warm publication includes acknowledged media B', async () => {
+      const body = await (await this.request('frontendA', '/article/recovery-published')).text();
+      return body.includes(this.acknowledgedTitle) && containsMedia(body, versionB);
+    }, { timeout: 90000 });
     const routes = ['/article/recovery-published', '/chapitres/recovery-chapter', '/itineraires-velo', '/itineraires-velo/recovery-itinerary', '/itineraires-velo/recovery-itinerary/gpx', '/itineraires-velo/recovery-itinerary/geometry'];
     const expectedText = (path) => path.startsWith('/article/') ? this.acknowledgedTitle : path.startsWith('/chapitres/') ? 'Chapitre de qualification' : 'Ville synthétique A';
     const warmed = new Map();
@@ -458,52 +602,94 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     const cookies = preview.headers.getSetCookie().map((cookie) => cookie.split(';')[0]).join('; ');
     assert.ok(cookies.includes('__prerender_bypass='));
     await this.request('frontendA', '/article/recovery-published', { headers: { Cookie: cookies } });
-    await this.scale('cms', 0);
-    await this.eventually('CMS stopped', async () => {
-      const pods = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=cms']);
-      return pods.items.length === 0;
+
+    const cmsProcess = async () => {
+      const pods = (await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=cms'])).items.filter((pod) => !pod.metadata.deletionTimestamp);
+      assert.equal(pods.length, 1); assert.equal(pods[0].metadata.labels['qualification.infra-sincere/uuid'], this.bench.manifest.vm.uuid);
+      const container = pods[0].status.containerStatuses[0]; assert.equal(container.ready, true);
+      assert.equal((await this.request('cms', '/api/release')).status, 200);
+      return { pod: pods[0].metadata.uid, container: container.containerID, restarts: container.restartCount };
+    };
+    const latestWorkerSweep = async () => {
+      const response = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-v', 'ON_ERROR_STOP=1', '-c',
+        "SELECT max(updated_at) FROM gthf_media_cleanup WHERE recurring=true AND state='pending'"]);
+      const time = Date.parse(response.stdout.toString().trim()); assert.ok(Number.isFinite(time)); return time;
+    };
+    const frontendMedia = async () => {
+      // Check the actual allowed path from the partitioned frontend, not merely
+      // a healthy MinIO connection from the external controller.
+      assert.equal(new URL(versionB.url).origin, 'http://minio:9000');
+      const result = await this.bench.kube(['exec', 'deployment/frontend-a', '--', 'node', '-e',
+        "const {createHash}=require('node:crypto');fetch(process.argv[1],{signal:AbortSignal.timeout(5000)}).then(async r=>{if(!r.ok)throw Error('storage');const b=Buffer.from(await r.arrayBuffer());process.stdout.write(createHash('sha256').update(b).digest('hex'))}).catch(()=>{process.exitCode=1})",
+        versionB.url], { timeout: 10000 });
+      assert.equal(result.stdout.toString(), this.mediaChecksums.get(versionB.url));
+    };
+    const cmsBefore = await cmsProcess(); const workerBefore = await latestWorkerSweep();
+    let coldStatus; let actualRetentionWaitMs; let cmsAliveSamples = 0;
+    await withCmsPartition(this.bench, async () => {
+      await this.eventually('Both frontends really lose CMS access while the CMS stays ready', async () => {
+        for (const frontend of ['frontendA', 'frontendB']) if ((await this.request(frontend, '/api/ready', { allow: [503] })).status !== 503) return false;
+        assert.deepEqual(await cmsProcess(), cmsBefore); await frontendMedia(); return true;
+      }, { timeout: 30000 });
+      assert.equal((await this.request('frontendA', '/api/serving')).status, 200);
+      const versionC = await this.assertMedia(await this.upload(randomUUID(), { id: history.id, bytes: await derivativeFixture() }), { width: 1200, height: 800 });
+      assert.equal(versionC.id, history.id); assert.notEqual(versionC.url, versionB.url);
+      history.versions.push(versionC);
+      for (const object of [versionB, ...Object.values(versionB.formats)]) this.obsoleteMedia.push({ url: object.url });
+      const replacedAt = Date.now();
+      // A finite 600s cleanup was the defect: observe beyond that real boundary
+      // with the same live CMS process, automatic worker and reachable storage.
+      while (Date.now() - replacedAt < 601000) {
+        await sleep(Math.min(30000, 601000 - (Date.now() - replacedAt)));
+        assert.deepEqual(await cmsProcess(), cmsBefore);
+        assert.equal((await this.request('minio', '/minio/health/ready')).status, 200);
+        cmsAliveSamples++;
+        this.bench.event({ event: 'media-history-retention-observation', elapsedMs: Date.now() - replacedAt, cmsUnchangedAndReady: true, storageReady: true });
+      }
+      actualRetentionWaitMs = Date.now() - replacedAt; assert.ok(actualRetentionWaitMs >= 601000);
+      assert.ok(await latestWorkerSweep() > workerBefore, 'The automatic CMS cleanup worker must still make progress during the partition');
+      await frontendMedia();
+      for (const object of this.obsoleteMedia) {
+        const response = await this.request('minio', new URL(object.url).pathname);
+        assert.equal(sha256(Buffer.from(await response.arrayBuffer())), this.mediaChecksums.get(object.url), 'Old versions must remain intact while the logical file exists');
+      }
+      for (const path of routes) {
+        const response = await this.request('frontendA', path, { timeout: 60000 }); const body = await response.text();
+        if (path.endsWith('/gpx') || path.endsWith('/geometry')) assert.equal(sha256(body), sha256(warmed.get(path)));
+        else assert.ok(body.includes(expectedText(path)), 'Warm public business content was lost during the partition');
+        if (path.startsWith('/article/')) {
+          assert.ok(containsMedia(body, versionB), 'The stale publication must still resolve its version B image');
+          assert.equal(containsMedia(body, versionC), false, 'A disconnected cache must not claim to have refreshed');
+        }
+      }
+      const cold = await this.request('frontendB', '/article/recovery-published', { allow: [500, 502, 503], timeout: 60000 });
+      coldStatus = cold.status; assert.ok(coldStatus >= 500, 'Cold cache must report a temporary outage');
+      const draft = await this.request('frontendA', '/article/recovery-published', { headers: { Cookie: cookies }, allow: [500, 502, 503], timeout: 60000 });
+      assert.ok(draft.status >= 500, 'Draft content must not use the public fallback');
+      await this.signal('frontend-b');
+      await this.eventually('Cold restarted frontend remains outside routing', async () => {
+        const pods = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-b']);
+        const container = pods.items[0]?.status.containerStatuses?.[0];
+        return container?.restartCount > 0 && container.ready === false;
+      });
+      const before = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-a']);
+      const previousContainer = before.items[0].status.containerStatuses[0].containerID;
+      await this.signal('frontend-a', 'SIGSTOP');
+      await this.eventually('Frozen frontend restarted by its actual liveness probe', async () => {
+        const pods = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-a']);
+        const container = pods.items[0]?.status.containerStatuses?.[0];
+        return container?.containerID && container.containerID !== previousContainer && container.ready === false;
+      });
+      assert.deepEqual(await cmsProcess(), cmsBefore);
     });
-    const serving = await this.request('frontendA', '/api/serving'); assert.equal(serving.status, 200);
-    const strict = await this.request('frontendA', '/api/ready', { allow: [503] }); assert.equal(strict.status, 503);
-    // Use the real 60s/300s TTLs: an immediate hit would not qualify stale fallback.
-    await sleep(301000);
-    for (const object of this.obsoleteMedia) {
-      const response = await this.request('minio', new URL(object.url).pathname);
-      assert.equal(sha256(Buffer.from(await response.arrayBuffer())), this.mediaChecksums.get(object.url), 'The previous public media bytes must survive past the longest cache TTL');
-    }
-    for (const path of routes) {
-      const response = await this.request('frontendA', path, { timeout: 60000 }); const body = await response.text();
-      if (path.endsWith('/gpx') || path.endsWith('/geometry')) assert.equal(sha256(body), sha256(warmed.get(path)));
-      else assert.ok(body.includes(expectedText(path)), 'Warm public business content was lost after its TTL during the outage');
-    }
-    const cold = await this.request('frontendB', '/article/recovery-published', { allow: [500, 502, 503], timeout: 60000 });
-    assert.ok(cold.status >= 500, 'Cold cache must report a temporary outage');
-    const draft = await this.request('frontendA', '/article/recovery-published', { headers: { Cookie: cookies }, allow: [500, 502, 503], timeout: 60000 });
-    assert.ok(draft.status >= 500, 'Draft content must not use the public fallback');
-    await this.signal('frontend-b');
-    await this.eventually('Cold restarted frontend remains outside routing', async () => {
-      const pods = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-b']);
-      const container = pods.items[0]?.status.containerStatuses?.[0];
-      return container?.restartCount > 0 && container.ready === false;
-    });
-    const before = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-a']);
-    const previousContainer = before.items[0].status.containerStatuses[0].containerID;
-    await this.signal('frontend-a', 'SIGSTOP');
-    await this.eventually('Frozen frontend restarted by its actual liveness probe', async () => {
-      const pods = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-a']);
-      const container = pods.items[0]?.status.containerStatuses?.[0];
-      return container?.containerID && container.containerID !== previousContainer && container.ready === false;
-    });
-    await this.scale('cms', 1); const returnedAt = Date.now(); await this.applications();
+    const returnedAt = Date.now(); await this.applications();
     for (const component of ['frontend-a', 'frontend-b']) await this.bench.kube(['rollout', 'status', 'deployment/' + component, '--timeout=180s'], { timeout: 200000 });
     const rtoMs = Date.now() - returnedAt; assert.ok(rtoMs <= DEADLINE);
     for (const frontend of ['frontendA', 'frontendB']) {
       assert.equal((await this.request(frontend, '/api/ready')).status, 200);
       const page = await (await this.request(frontend, '/article/recovery-published')).text();
-      assert.ok(page.includes(this.acknowledgedTitle));
+      assert.ok(page.includes(this.acknowledgedTitle)); assert.ok(containsMedia(page, history.versions[2]));
     }
-    // Both processes now hold the old publication. A fresh acknowledged update
-    // must replace those warm representations after the dependency returns.
     this.acknowledgedTitle = 'Publication après reprise ' + randomUUID();
     await this.admin(MODEL + '/' + this.fixtures.article, { method: 'PUT', json: { title: this.acknowledgedTitle } });
     await this.admin(MODEL + '/' + this.fixtures.article + '/actions/publish', { method: 'POST', json: {} });
@@ -516,13 +702,61 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
       return true;
     }, { timeout: 90000 });
     await this.assertArticle();
-    return { warmPublicRoutes: routes.length, realCacheExpiryWaitMs: 301000, previousMediaRetainedPastCacheTtl: true, coldTemporaryError: cold.status, previewBypassedCache: true, frozenProcessRestarted: true, rtoMs, publicationConvergenceMs: Date.now() - publishedAt };
+    return { warmPublicRoutes: routes.length, realCacheExpiryWaitMs: actualRetentionWaitMs, historicalMediaRetainedWhileFileExists: true,
+      cmsAliveSamples, automaticCleanupWorkerProgressed: true, actualFrontendCmsPartition: true, frontendMinioStillReachable: true,
+      coldTemporaryError: coldStatus, previewBypassedCache: true, frozenProcessRestarted: true, rtoMs, publicationConvergenceMs: Date.now() - publishedAt };
+  }
+
+  async deleteReplacementHistory() {
+    const history = this.replacementHistory; assert.equal(history.versions.length, 3);
+    const objects = history.versions.flatMap((media) => [media, ...Object.values(media.formats)]);
+    assert.equal(new Set(objects.map((object) => object.url)).size, objects.length, 'Each version must use distinct immutable keys');
+    const unrelated = this.acknowledged[0].media;
+    assert.notEqual(unrelated.id, history.id); await this.assertMedia(unrelated);
+    const key = randomUUID();
+    await this.admin('/upload/files/' + history.id, { method: 'DELETE', headers: { 'Idempotency-Key': key } });
+    await this.receipt(key, 'committed'); assert.equal(await this.fileCount(history.id), 0);
+    await this.admin('/upload/files/' + history.id, { method: 'DELETE', headers: { 'Idempotency-Key': key } });
+    await this.eventually('One explicit media deletion cleans all A, B and C versions', async () => {
+      for (const object of objects) if ((await this.request('minio', new URL(object.url).pathname, { allow: [404] })).status !== 404) return false;
+      const result = await this.bench.kube(['exec', 'deployment/postgres', '--', 'psql', '-U', 'gthf_recovery', '-d', this.bench.manifest.database, '-At', '-v', 'ON_ERROR_STOP=1', '-c',
+        "SELECT count(*) FROM gthf_media_cleanup WHERE retain_file_id=" + history.id + " OR operation_key='" + key + "'"]);
+      return Number(result.stdout.toString().trim()) === 0;
+    });
+    assert.equal(await this.operationCount(key), 1); await this.assertMedia(unrelated);
+    return { versions: 3, deletedObjects: objects.length, explicitDeletionOnly: true, historiesCleanedAfterSqlDelete: true,
+      deleteReplayUnique: true, unrelatedMediaPreserved: true };
   }
   async revocation() {
     await this.request('frontendA', '/article/recovery-published');
     await this.request('frontendA', '/itineraires-velo/recovery-itinerary/gpx');
+    // First admission reads readiness directly; it must not prewarm the full
+    // global projection. Warm only the GPX feature switch on a fresh process.
+    const before = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-b']);
+    const previousContainer = before.items[0].status.containerStatuses[0].containerID;
+    await this.signal('frontend-b');
+    await this.eventually('Fresh frontend B admitted before cross-projection closure', async () => {
+      const pods = await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=frontend-b']);
+      const container = pods.items[0]?.status.containerStatuses?.[0];
+      return container?.containerID && container.containerID !== previousContainer && container.ready === true;
+    });
+    const openGpx = await this.request('frontendB', '/itineraires-velo/recovery-itinerary/gpx');
+    assert.ok((await openGpx.text()).includes('<gpx'));
+    const partialWarmedAt = Date.now();
+    const globalResponse = await this.admin('/content-manager/single-types/api::global.global');
+    const previousLlmsTxt = (globalResponse.data ?? globalResponse).llmsTxt ?? null;
+    assert.ok(previousLlmsTxt === null || typeof previousLlmsTxt === 'string');
+    const closureMarker = 'Qualification closure ' + randomUUID();
     await this.admin(MODEL + '/' + this.fixtures.article + '/actions/unpublish', { method: 'POST', json: {} });
-    await this.admin('/content-manager/single-types/api::global.global', { method: 'PUT', json: { publishCityItinerariesToNext: false } });
+    await this.admin('/content-manager/single-types/api::global.global', { method: 'PUT', json: { publishCityItinerariesToNext: false, llmsTxt: closureMarker } });
+    // The real text route exposes a marker from the full global response. Its false
+    // switch must revoke the still-fresh partial response used by the GPX route.
+    const globalText = await this.request('frontendB', '/llms.txt');
+    assert.equal(await globalText.text(), closureMarker, 'The full global projection must confirm this closure');
+    const immediateGpx = await this.request('frontendB', '/itineraires-velo/recovery-itinerary/gpx', { allow: [404] });
+    assert.equal(immediateGpx.status, 404);
+    const crossProjectionClosureMs = Date.now() - partialWarmedAt;
+    assert.ok(crossProjectionClosureMs < 60000, 'Cross-projection revocation must precede the partial response TTL');
     // Exercise the real production TTL. A confirmed revocation must remain
     // absent even if the CMS subsequently disappears.
     await sleep(61000);
@@ -532,9 +766,10 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     await this.eventually('CMS no longer routed', async () => (await this.bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=cms'])).items.length === 0);
     const revokedArticle = await this.request('frontendA', '/article/recovery-published', { allow: [404, 500, 503] }); assert.notEqual(revokedArticle.status, 200);
     const revokedGpx = await this.request('frontendA', '/itineraires-velo/recovery-itinerary/gpx', { allow: [404, 500, 503] }); assert.notEqual(revokedGpx.status, 200);
+    const revokedProjection = await this.request('frontendB', '/itineraires-velo/recovery-itinerary/gpx', { allow: [404, 500, 503] }); assert.notEqual(revokedProjection.status, 200);
     await this.scale('cms', 1); await this.applications();
     await this.admin(MODEL + '/' + this.fixtures.article + '/actions/publish', { method: 'POST', json: {} });
-    await this.admin('/content-manager/single-types/api::global.global', { method: 'PUT', json: { publishCityItinerariesToNext: true } });
+    await this.admin('/content-manager/single-types/api::global.global', { method: 'PUT', json: { publishCityItinerariesToNext: true, llmsTxt: previousLlmsTxt } });
     await this.eventually('Publication restored after CMS recovery', async () => {
       const response = await this.request('frontendA', '/article/recovery-published', { allow: [404, 500, 503] });
       return response.ok && (await response.text()).includes(this.acknowledgedTitle);
@@ -543,11 +778,13 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
       const response = await this.request('frontendA', '/itineraires-velo/recovery-itinerary/gpx', { allow: [404, 500, 503] });
       return response.ok && (await response.text()).includes('<gpx');
     });
-    return { confirmedArticleRevocation: true, confirmedCatalogueClosure: true, staleFallbackRevoked: true, reopenedSuccessfully: true };
+    return { confirmedArticleRevocation: true, confirmedCatalogueClosure: true, crossProjectionClosureMs,
+      freshPartialProjectionRevokedByFullResponse: true, staleFallbackRevoked: true, reopenedSuccessfully: true };
   }
   async run() {
     await this.tunnels(); await this.applications(); await verifyImages(this.bench);
     await this.scenario('Golden Journey: acknowledged publication, media and receipt permissions', () => this.acknowledgement());
+    await this.scenario('Golden Journey: URL import resumes after a real CMS crash and replays without refetch', () => this.interruptedUrlImport());
     await this.scenario('Golden Journey: interrupted editing and publication preserve acknowledged drafts', () => this.interruptedPublication());
     await this.scenario('Golden Journey: interrupted upload retries the same intent', () => this.interruptedUpload());
     await this.scenario('Golden Journey: revoked permissions prevent autonomous media commit after a crash', () => this.revokedAuthorization());
@@ -556,12 +793,10 @@ fd=os.open(p,os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     await this.scenario('Golden Journey: late PostgreSQL and S3, second crash during recovery', () => this.lateDependenciesAndSecondCrash());
     await this.scenario('Golden Journey: replacement commit survives lost response and power cut', () => this.replaceAfterCommit());
     await this.scenario('Golden Journey: deletion cleanup resumes without dangling references', () => this.deletion());
+    await this.scenario('Golden Journey: bulk deletion resumes a partial parent without duplicate child operations', () => this.interruptedBulkDelete());
     await this.scenario('Golden Journey: warm, cold, dead and frozen frontend with protected preview', () => this.frontend());
     await this.scenario('Golden Journey: confirmed unpublication and catalogue closure revoke fallback', () => this.revocation());
-    await this.scenario('Golden Journey: obsolete replacement objects are removed after cache retention', async () => {
-      for (const object of this.obsoleteMedia) await this.eventually('Obsolete media retention cleanup', async () => (await this.request('minio', new URL(object.url).pathname, { allow: [404] })).status === 404, { timeout: Math.max(30000, object.replacedAt + 630000 - Date.now()) });
-      return { retainedForPublicCachesThenRemoved: true, objects: this.obsoleteMedia.length };
-    });
+    await this.scenario('Golden Journey: explicit media deletion cleans all retained replacement versions', () => this.deleteReplacementHistory());
     assert.equal(this.cutCount, 3, 'Exactly three real business VM power cuts are required');
     await verifyImages(this.bench);
     return this.results;

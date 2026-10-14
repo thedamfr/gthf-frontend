@@ -4,7 +4,9 @@ import { createReadStream, existsSync, readFileSync, writeFileSync } from 'node:
 import { dirname, join, relative } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { GUEST_ROOT, NAMESPACE, requireRegularPath } from './manifest.mjs';
+import { requireImageRevision } from '../../infrastructure/delivery/image-proof.mjs';
 import { freshCredentials, profile, COMPONENTS } from './profile.mjs';
+import { runtimeImageProof } from './runtime-image-proof.mjs';
 
 async function checksum(path) {
   const digest = createHash('sha256');
@@ -177,16 +179,44 @@ export async function installCandidate(bench) {
   bench.event({ event: 'candidate-installed', sourceRevisions: manifest.sourceRevisions, retainedFixtures: true, retainedVolumes: true });
 }
 
+export async function quiesceJournalCms(bench, { timeout = 180000, interval = 2000 } = {}) {
+  const uuid = bench.manifest.vm.uuid;
+  const namespace = await bench.kubeJson(['get', 'namespace', NAMESPACE]);
+  assert.equal(namespace.metadata.labels['qualification.infra-sincere/uuid'], uuid);
+  assert.equal(namespace.metadata.labels['qualification.infra-sincere/run-id'], bench.manifest.runId);
+  const deployments = await bench.kubeJson(['get', 'deployments', '--field-selector=metadata.name=cms']);
+  assert.ok(deployments.items.length <= 1, 'Only one identified CMS deployment may be quiesced');
+  for (const deployment of deployments.items) {
+    assert.equal(deployment.metadata.name, 'cms');
+    assert.equal(deployment.metadata.labels['qualification.infra-sincere/uuid'], uuid);
+  }
+  const pods = await bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=cms']);
+  for (const pod of pods.items) assert.equal(pod.metadata.labels['qualification.infra-sincere/uuid'], uuid);
+  const previousReplicas = deployments.items[0]?.spec.replicas ?? 0;
+  if (deployments.items.length) await bench.kube(['scale', 'deployment/cms', '--replicas=0']);
+  const deadline = Date.now() + timeout;
+  do {
+    const current = await bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=cms']);
+    for (const pod of current.items) assert.equal(pod.metadata.labels['qualification.infra-sincere/uuid'], uuid);
+    if (current.items.length === 0) {
+      bench.event({ event: 'journal-cms-quiesced', previousReplicas, retainedVolumes: true,
+        nextAction: 'install the candidate before application qualification; never restart the older runtime after additive migration' });
+      return;
+    }
+    await sleep(interval);
+  } while (Date.now() < deadline);
+  throw new Error('The identified CMS did not stop before the journal deadline');
+}
+
 export async function checkJournal(bench) {
   await bench.waitGuest();
   const manifest = bench.manifest;
-  const cmsPods = await bench.kubeJson(['get', 'pods', '-l', 'app.kubernetes.io/component=cms']);
-  assert.equal(cmsPods.items.length, 0, 'No long-running CMS may race this deliberately expired-lease database test');
   const credentials = JSON.parse(readFileSync(requireRegularPath(join(bench.root, 'credentials.json'), { privateFile: true }), 'utf8'));
   const secret = await bench.kubeJson(['get', 'secret', 'gthf-recovery-secrets']);
   assert.equal(secret.metadata.labels['qualification.infra-sincere/uuid'], manifest.vm.uuid);
   for (const [key, value] of Object.entries(credentials)) assert.equal(Buffer.from(secret.data[key], 'base64').toString(), value);
   await importImages(bench);
+  await quiesceJournalCms(bench);
   const foundation = profile(manifest, credentials, '');
   const job = foundation.fixtures[1];
   const name = 'journal-check-' + manifest.sourceRevisions.cms.slice(0, 12) + '-' + Date.now();
@@ -219,6 +249,10 @@ export async function checkJournal(bench) {
 }
 
 export async function verifyImages(bench) {
+  const cmsImage = bench.manifest.images.cms;
+  const cmsConfig = (await bench.guest(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', cmsImage.runtimeConfigDigest])).stdout;
+  assert.equal('sha256:' + createHash('sha256').update(cmsConfig).digest('hex'), cmsImage.runtimeConfigDigest, 'CMS OCI configuration must match its linked digest');
+  requireImageRevision(JSON.parse(cmsConfig.toString()), cmsImage.revision, 'cms');
   const pods = await bench.kubeJson(['get', 'pods']);
   const verified = [];
   for (const name of COMPONENTS) {
@@ -228,8 +262,6 @@ export async function verifyImages(bench) {
     const pod = matching[0];
     assert.equal(pod.metadata.labels['qualification.infra-sincere/uuid'], bench.manifest.vm.uuid);
     assert.equal(pod.status.phase, 'Running', 'Candidate pod must be running');
-    const allowed = new Set([expected.digest, expected.runtimeManifestDigest, expected.runtimeConfigDigest]);
-    for (const digest of allowed) assert.match(digest, /^sha256:[a-f0-9]{64}$/, 'An exact OCI runtime digest is required');
     const containers = pod.spec.containers;
     const initContainers = pod.spec.initContainers ?? [];
     assert.ok(containers.length > 0, 'Candidate runtime container is missing');
@@ -246,11 +278,11 @@ export async function verifyImages(bench) {
         assert.equal(container.image, expected.ref, 'Runtime and initializer references must match the candidate');
         const status = statuses.find((entry) => entry.name === container.name);
         assert.ok(status, 'Candidate container status is missing');
-        const actual = /(?:^|@|:\/\/)(sha256:[a-f0-9]{64})$/.exec(status.imageID ?? '')?.[1];
-        assert.ok(actual && allowed.has(actual), 'Running image differs from the cryptographically linked OCI digests');
+        const runtimeProof = await runtimeImageProof({ image: container.image, imageID: status.imageID, expected },
+          async (digest) => (await bench.guest(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', digest])).stdout);
         if (isInit) assert.equal(status.state?.terminated?.exitCode, 0, 'Cache initializer must finish successfully with the candidate image');
         else assert.ok(status.ready && status.state?.running, 'Candidate container is not running and ready');
-        proof[isInit ? 'initContainers' : 'containers'].push({ name: container.name, image: container.image, imageID: status.imageID });
+        proof[isInit ? 'initContainers' : 'containers'].push({ name: container.name, image: container.image, imageID: status.imageID, runtimeProof });
       }
     }
     verified.push(proof);

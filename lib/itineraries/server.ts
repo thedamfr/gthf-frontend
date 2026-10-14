@@ -4,6 +4,7 @@ import 'server-only';
 import { cache } from 'react';
 
 import { readCmsJson } from '../cms-read';
+import { validStrapiResponse } from '../strapi-response';
 import { guardCityItinerary } from './guard';
 import { itineraryStrapiCacheOptions, type ItineraryRequestKind } from './cache-policy';
 import {
@@ -84,7 +85,7 @@ async function requestStrapiJson<T>(
     revalidate: 'next' in policy ? policy.next.revalidate : 0,
     maximumBytes: STRAPI_RESPONSE_LIMIT_BYTES,
     validate: (value) => requestKind === 'feature-switch'
-      ? (value as { data?: unknown }).data === null || typeof (value as { data?: { publishCityItinerariesToNext?: unknown } }).data?.publishCityItinerariesToNext === 'boolean'
+      ? validStrapiResponse(value, 'data')
       : Array.isArray((value as { data?: unknown }).data),
   });
 }

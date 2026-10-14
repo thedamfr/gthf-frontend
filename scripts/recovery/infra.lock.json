@@ -1,6 +1,10 @@
 {
   "repository": "thedamfr/infra-sincere",
-  "revision": "5c8a46963b8203dee57f2902faa7c22b6243215d",
+  "revision": "23a87fdcd8b0a70d855397776f532f209cc7755a",
   "controller": "scripts/qualification/vm.py",
-  "status": "common-golden-journeys-passed-2026-10-13"
+  "status": "candidate-requires-consumer-qualification",
+  "files": {
+    "vm.py": "6566e93439bf22ac3349ce6a6626a4f612be9cc0c0e1e15e6f3e205d84e5cd62",
+    "provision-vm.py": "2c995a41a764c763286bff0786b4604c6f13d591e316d4e3324c2952a4a4b4aa"
+  }
 }

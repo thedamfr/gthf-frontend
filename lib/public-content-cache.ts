@@ -16,17 +16,20 @@ interface LoadOptions<T> {
   scope: string;
   parentScope?: string;
   withdrawsParent?: (value: T) => boolean;
+  withdrawsScope?: (value: T) => boolean;
   ttlMs: number;
   load: () => Promise<T>;
   tags?: (value: T) => string[];
   revokedTags?: (value: T) => string[];
   changedTags?: (previous: T, value: T) => string[];
+  authority?: (value: T) => Record<string, unknown>;
 }
 
 export class PublicContentCache {
   private entries = new Map<string, Entry<unknown>>();
   private pending = new Map<string, Promise<unknown>>();
   private generations = new Map<string, number>();
+  private authorities = new Map<string, { revision: number; fields: Map<string, { revision: number; serialized: string }> }>();
   private bytes = 0;
   private readonly maximumBytes: number;
   private readonly now: () => number;
@@ -35,8 +38,9 @@ export class PublicContentCache {
     this.maximumBytes = maximumBytes; this.now = now; this.maximumEntries = maximumEntries;
   }
 
-  invalidate(scope: string, tags?: string[]) {
-    this.generations.set(scope, (this.generations.get(scope) ?? 0) + 1);
+  invalidate(scope: string, tags?: string[], advanceGeneration = true) {
+    if (advanceGeneration) this.generations.set(scope, (this.generations.get(scope) ?? 0) + 1);
+    if (!tags) this.authorities.delete(scope);
     for (const [key, entry] of this.entries) {
       if ((entry.scope === scope || entry.parentScope === scope) && (!tags || entry.tags.some((tag) => tags.includes(tag)))) {
         this.entries.delete(key); this.bytes -= entry.bytes;
@@ -61,6 +65,7 @@ export class PublicContentCache {
 
   private async refresh<T>(options: LoadOptions<T>, previous?: Entry<T>): Promise<T> {
     const generation = this.generations.get(options.scope) ?? 0;
+    const authorityRevision = this.authorities.get(options.scope)?.revision ?? 0;
     const parentGeneration = options.parentScope ? this.generations.get(options.parentScope) ?? 0 : 0;
     let value: T;
     try { value = await options.load(); }
@@ -77,22 +82,45 @@ export class PublicContentCache {
     if ((this.generations.get(options.scope) ?? 0) !== generation) throw new PublicContentUnavailable();
     if (options.parentScope && (this.generations.get(options.parentScope) ?? 0) !== parentGeneration) throw new PublicContentUnavailable();
     if (options.parentScope && options.withdrawsParent?.(value)) this.invalidate(options.parentScope);
+    if (options.withdrawsScope?.(value)) this.invalidate(options.scope);
     const serialized = JSON.stringify(value);
     const bytes = new TextEncoder().encode(serialized).byteLength;
     // A confirmed update/withdrawal also invalidates other queries of this collection.
     const tags = options.tags?.(value) ?? [];
-    if (previous && previous.serialized !== serialized) {
-      this.invalidate(options.scope, options.tags ? [...previous.tags, ...tags] : undefined);
-    }
-    // A first read through a different projection can confirm a newer version
-    // of an already cached document. Compare shared fields, not whole payloads.
-    const superseded = new Set<string>();
-    for (const entry of this.entries.values()) {
-      if (entry.scope === options.scope) {
-        for (const tag of options.changedTags?.(entry.value as T, value) ?? []) superseded.add(tag);
+    if (options.authority) {
+      const incoming = Object.entries(options.authority(value)).map(([tag, field]) => [tag, JSON.stringify(field)] as const);
+      const authority = this.authorities.get(options.scope) ?? { revision: 0, fields: new Map<string, { revision: number; serialized: string }>() };
+      // A later confirmed value defeats a contradicting response that was
+      // already in flight, even when no payload had yet entered the cache.
+      for (const [tag, field] of incoming) {
+        const confirmed = authority.fields.get(tag);
+        if (confirmed && confirmed.revision > authorityRevision && confirmed.serialized !== field) throw new PublicContentUnavailable();
       }
+      const changed: string[] = [];
+      for (const [tag, field] of incoming) {
+        if (authority.fields.get(tag)?.serialized !== field) {
+          authority.fields.set(tag, { revision: ++authority.revision, serialized: field });
+          changed.push(tag);
+        }
+      }
+      this.authorities.set(options.scope, authority);
+      // Only payloads containing a changed field are evicted. Concurrent reads
+      // of unrelated fields (or the same confirmed value) remain admissible.
+      if (changed.length) this.invalidate(options.scope, changed, false);
+    } else {
+      if (previous && previous.serialized !== serialized) {
+        this.invalidate(options.scope, options.tags ? [...previous.tags, ...tags] : undefined);
+      }
+      // A first read through a different projection can confirm a newer version
+      // of an already cached document. Compare shared fields, not whole payloads.
+      const superseded = new Set<string>();
+      for (const entry of this.entries.values()) {
+        if (entry.scope === options.scope) {
+          for (const tag of options.changedTags?.(entry.value as T, value) ?? []) superseded.add(tag);
+        }
+      }
+      if (superseded.size) this.invalidate(options.scope, [...superseded]);
     }
-    if (superseded.size) this.invalidate(options.scope, [...superseded]);
     const revoked = options.revokedTags?.(value) ?? [];
     if (revoked.length) this.invalidate(options.scope, revoked);
     const existing = this.entries.get(options.key);

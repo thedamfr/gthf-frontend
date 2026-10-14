@@ -9,6 +9,13 @@ const sha = /^[a-f0-9]{40}$/;
 const digest = /^sha256:[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
+/** Campaign IDs are also Kubernetes label values: 14-byte prefix + 49-byte suffix. */
+export function requireRunId(value) {
+  assert.match(value ?? '', /^gthf-recovery-[a-z0-9](?:[a-z0-9-]{0,47}[a-z0-9])?$/,
+    'Run ID must fit a Kubernetes label (at most 63 characters with an alphanumeric suffix)');
+  return value;
+}
+
 /** Do not follow any symlink, including a symlink in a parent directory. */
 export function requireRegularPath(path, { directory = false, privateFile = false } = {}) {
   assert.ok(isAbsolute(path), 'An absolute path is required');
@@ -33,7 +40,7 @@ export function validateManifest(value, { target, infraRevision } = {}) {
   assert.equal(target, 'vm', 'The only recovery target is the isolated VM');
   assert.equal(value.schemaVersion, 1);
   assert.equal(value.consumer, 'gthf');
-  assert.match(value.runId, /^gthf-recovery-[a-z0-9-]{1,64}$/);
+  requireRunId(value.runId);
   assert.equal(value.target, 'vm');
   assert.equal(value.namespace, NAMESPACE);
   assert.equal(value.vm.hostname, 'infra-qualification-vm');
@@ -59,6 +66,8 @@ export function validateManifest(value, { target, infraRevision } = {}) {
     assert.equal(image.imageId, image.runtimeConfigDigest, 'Runtime image ID must be linked to the OCI configuration');
     if (component === 'cms' || component === 'frontend') assert.equal(image.revision, value.sourceRevisions[component]);
   }
+  assert.equal(value.images.cms.mediaRecoveryVersion, '2', 'CMS must preserve replacement history and recurring cleanup');
+  assert.equal(value.images.cms.mediaBatchRecoveryVersion, '1', 'CMS must resume durable media batches');
   assert.equal(value.guestRoot, GUEST_ROOT);
   assert.equal(value.database, 'gthf_recovery_' + value.vm.uuid.replaceAll('-', ''));
   assert.equal(value.bucket, 'gthf-recovery-' + value.vm.uuid);

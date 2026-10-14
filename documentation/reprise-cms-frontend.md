@@ -12,50 +12,48 @@ de déclarer ce jalon livré.
 
 ## Synthèse
 
-Les appels JSON CMS ont un délai effectif de 10 secondes, couvrant aussi le
-corps HTTP. Seuls les résultats de requêtes `status=published`, structurellement
-validés, entrent dans un cache local au processus : 60 secondes pour les
-articles et gardes du catalogue, 300 secondes pour les chapitres et données
-éditoriales du catalogue. Les données globales conservent leur durée existante.
+Les appels JSON CMS ont un délai effectif de 10 secondes, corps HTTP compris.
+Seuls les résultats `status=published` validés entrent dans le cache du processus :
+60 secondes pour articles et gardes du catalogue, 300 pour chapitres et données
+éditoriales du catalogue. Les données globales gardent leur durée existante.
 Les commutateurs de publication sont consultés à chaque lecture ; leur dernier
-état validé sert seulement lors d'une panne. Une erreur transitoire ou un JSON
-invalide ne remplace jamais une publication valide. Un refus d'accès, une
-absence ou une modification confirmée invalide les autres requêtes de la
-collection concernée. Une fermeture confirmée reste fermée même si le CMS tombe
-ensuite en panne.
+état validé sert pendant une panne. Une erreur transitoire ou un JSON invalide
+ne remplace pas une publication valide. Un refus d’accès, retrait ou changement
+confirmé invalide les copies concernées. Une fermeture confirmée reste fermée
+si le CMS devient ensuite inaccessible. Les previews restent hors cache.
 
-Le cache JSON est limité à 256 entrées et 32 Mio de représentations sérialisées,
-avec éviction des entrées les moins récemment lues. Il n'est ni partagé ni
-persistant : le remplacement d'une instance commence à froid. Les octets GPX et
-géométrie validés par SHA-256 disposent d'un cache distinct de 64 entrées/32 Mio ;
-la garde de publication et les métadonnées sont vérifiées avant chaque accès.
-Les previews restent hors cache ; les pannes sont réessayées après une seconde.
+Le cache JSON contient au plus 256 entrées et 32 Mio, avec éviction des moins
+récemment lues. Non partagé et non persistant, il disparaît au remplacement du
+processus. Les octets GPX/géométrie vérifiés par SHA-256 disposent de 64 entrées
+et 32 Mio supplémentaires ; garde de publication et métadonnées précèdent chaque
+accès. Les erreurs sont réessayées après une seconde.
 
-`/api/serving` admet une nouvelle instance après une vraie lecture CMS réussie,
-puis conserve cette admission pendant la vie du processus pour permettre les
-lectures chaudes. `/api/health` reste la santé locale et l'identité de l'image.
-`/api/ready` reste un contrôle sans cache des dépendances : une livraison ne
-peut pas être validée grâce au seul cache chaud. Le déployeur vérifie d'abord les
-images et labels OCI exacts, puis attend au plus 90 secondes la fin des anciens
-processus et la révision publique attendue. Une mauvaise image échoue directement.
+`/api/serving` admet une instance après une lecture CMS réussie, puis garde cette
+admission pour ses lectures chaudes. `/api/health` vérifie le processus et son
+identité ; `/api/ready` contrôle toujours les dépendances sans cache. La livraison
+exige les images/labels OCI exacts, puis la convergence publique sous 90 secondes.
+Une mauvaise image échoue directement.
 
-La première activation livre d’abord le frontend compatible, puis remplace le
-CMS en `Recreate`, sans anciens et nouveaux writers simultanés. Son interruption
-attendue est chronométrée dans une fenêtre de 390 secondes maximum ; le
-frontend et les erreurs hors fenêtre restent bloquants. Ensuite, 60 secondes
-continues de santé sont exigées. Les activations suivantes restent progressives.
+La première activation livre le frontend compatible, puis remplace le CMS en
+`Recreate`, sans anciens et nouveaux writers simultanés. Sa fenêtre d’interruption
+CMS est bornée à 390 secondes ; les erreurs frontend ou hors fenêtre bloquent.
+Ensuite, 60 secondes continues de santé sont exigées. Seules les transitions
+entre images v2 compatibles avec les lots durables restent progressives.
 
-Un journal média existant interdit le rollback automatique vers un ancien CMS
-sans capacité de reprise attestée, même avec zéro opération en attente. La
-lecture PostgreSQL doit réussir et l'image cible doit porter le label OCI
-`io.gthf.media-recovery=1` à la révision attendue. Sinon la livraison échoue en
-conservant l'image actuelle et les journaux ; une intervention compatible est
-nécessaire.
+Après une activation possible du nouveau CMS, tout rollback exige les labels OCI
+`io.gthf.media-recovery=2` et `io.gthf.media-batch-recovery=1` à la révision attendue,
+même si les tables semblent encore absentes ou vides. PostgreSQL doit répondre.
+Sinon la livraison échoue en conservant l’image et les journaux ; il faut réparer
+avec une version compatible, sans rétablir automatiquement l’ancien worker.
 
-Ce jalon traite la reprise de l'issue #39 et la convergence de l'issue #42. Il
-ne valide ni 1 000 visiteurs simultanés, ni un HPA, ni deux réplicas permanents
-en production. La campagne isolée utilise deux instances pour vérifier les
-copies chaudes/froides, les retraits et le retour des dépendances.
+Les versions remplacées restent lisibles tant que le média logique existe : une
+partition peut prolonger le cache au-delà des TTL. La suppression explicite
+et autorisée nettoie toutes ses versions. Le stockage augmente avec les
+remplacements ; remplacer seul ne révoque pas les anciennes URL.
+
+Ce jalon couvre la reprise de #39 et la convergence de #42. Il ne qualifie ni
+1 000 visiteurs simultanés, ni HPA, ni deux réplicas permanents en production.
+Deux instances VM vérifient copies chaudes/froides, retraits et reprise.
 
 ## Annexes
 
@@ -87,9 +85,10 @@ revalidation. Aucun contenu privé ou draft n'est accepté dans le cache public.
 
 La première activation du journal média utilise `Recreate` pour le CMS seul :
 le déploiement et l’image précédents doivent correspondre à la preuve livrée,
-et le manifeste/configuration OCI local doit attester l’absence du label de
-reprise. Les anciens processus s’arrêtent avant le nouveau worker. Une image
-précédente attestée v1 conserve `RollingUpdate` ; une preuve inaccessible ou
+et le manifeste/configuration OCI local doit attester une image sans capacité
+de reprise ou v1. Les anciens processus s’arrêtent avant le nouveau worker : v1
+ignore la rétention des historiques. Seule une image v2 avec capacité lots v1
+conserve `RollingUpdate` ; une preuve inaccessible ou
 incohérente bloque avant mutation. Les deux chemins de livraison, image seule
 et infrastructure, imposent cette stratégie avant de créer le nouveau pod.
 
@@ -108,13 +107,46 @@ cette admission bloque la transition avant mutation CMS.
 ### Retour arrière et intentions médias
 
 Les deux chemins de rollback (composants et infrastructure) contrôlent les
-tables `gthf_media_operations` et `gthf_media_cleanup` avant toute restauration
+tables `gthf_media_operations`, `gthf_media_cleanup` et `gthf_media_batches`
+avant toute restauration
 susceptible de remplacer le CMS. Les comptes `preparing`, `prepared`,
 `interrupted` et `cleanupPending` sont conservés dans la preuve privée. Une
-absence de tables autorise l'ancien CMS ; des tables partielles, des états
-inconnus ou une lecture DB impossible bloquent le rollback. Des tables présentes
-exigent toujours un worker compatible : un compte nul ne constitue pas une
-barrière empêchant un nouvel upload entre le contrôle et le changement d'image.
+absence de tables ne permet pas de rétablir l'ancien CMS : le candidat peut
+terminer son initialisation entre la lecture et le changement d'image. Des
+tables partielles, des états inconnus ou une lecture DB impossible bloquent aussi
+le rollback. Tous ces retours arrière exigent un worker média v2 et lots v1,
+sans exception selon le nombre d'opérations observées.
 Les références d'image, le digest de configuration et le label de révision OCI
-sont vérifiés avant d'accepter la capacité de reprise v1. Aucune table, intention
-ou donnée média n'est supprimée par ce contrôle.
+sont vérifiés avant d'accepter les capacités de reprise v2 et de lots v1.
+Les lots `pending`, `committed` et `failed` sont comptés séparément ; un état
+inconnu bloque. Le refus conserve dans la preuve privée l'action attendue
+`repair-forward-with-compatible-worker`. Les tests modélisent une initialisation
+concurrente des tables après leur lecture et refusent toute application de
+l'ancien CMS. Aucune table, intention ou donnée média n'est supprimée par ce contrôle.
+
+### Médias remplacés et partition réseau
+
+Un TTL de revalidation n’est pas un âge maximal du fallback. Un ancien délai de
+nettoyage de dix minutes pouvait donc casser une publication encore servie ; les
+données globales peuvent aussi rester fraîches une heure. Le CMS v2 ancre chaque
+intention de nettoyage d’une ancienne version à `retain_file_id`. Tant que le
+fichier logique existe, le worker ne la réclame pas et ne fait aucun HEAD pour
+elle. Le commit SQL d’une suppression explicitement autorisée rend les anciennes
+versions et la version courante nettoyables. Les droits et conflits de version
+restent contrôlés ; un échec de suppression ne libère pas les historiques.
+
+Les anciennes URL publiques restent donc lisibles après remplacement, jusqu’à
+cette suppression ; aucune purge automatique basée uniquement sur l’âge n’est
+promise. Le stockage augmente avec les remplacements. Le cache JSON garde ses
+limites mémoire et sa révocation dès confirmation du retrait. Une suppression
+explicite peut casser les anciennes références : elle demeure prioritaire sur
+leur disponibilité. Cela ne crée pas une invalidation globale des caches des
+navigateurs ou du cache d’optimisation d’images Next.
+
+Le Golden Journey VM conserve A puis B, publie et réchauffe B, coupe uniquement
+les accès des frontends au CMS puis remplace B par C. Pendant 601 secondes réelles,
+le CMS et son worker restent actifs, MinIO reste accessible depuis le frontend,
+et A/B gardent leurs octets. La dernière publication doit encore afficher B. Une
+suppression de C doit ensuite nettoyer A/B/C, préserver un média indépendant et
+rejouer le même reçu. La NetworkPolicy est retirée dans `finally`, y compris en
+cas d’échec ; ces mutations restent limitées à la VM identifiée.

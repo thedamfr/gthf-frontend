@@ -9,7 +9,7 @@ import re
 import tarfile
 
 
-def convert(source, destination, reference):
+def convert(source, destination, reference, *, runtime_only=False):
     if not re.fullmatch(r'[a-z0-9][a-z0-9./_-]*(?::[A-Za-z0-9_.-]+)?@sha256:[a-f0-9]{64}', reference):
         raise ValueError('An immutable image reference is required')
     repository, expected = reference.split('@')
@@ -62,6 +62,12 @@ def convert(source, destination, reference):
         if config.get('os') != 'linux' or config.get('architecture') != 'amd64':
             raise ValueError('Incorrect runtime platform')
         result = {'canonicalRef': canonical, 'digest': expected, 'runtimeManifestDigest': descriptor['digest'], 'runtimeConfigDigest': value['config']['digest'], 'imageId': value['config']['digest']}
+        if runtime_only:
+            # Select an existing manifest descriptor; never rewrite a manifest,
+            # configuration or layer to turn an index into an executable target.
+            root = descriptor
+            canonical = canonical.split('@')[0] + '@' + descriptor['digest']
+            result.update(canonicalRef=canonical, digest=descriptor['digest'], sourceDigest=expected)
         index = {'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.index.v1+json', 'manifests': [{**root, 'annotations': {**root.get('annotations', {}), 'io.containerd.image.name': canonical}}]}
 
         with open(destination, 'xb') as raw:
@@ -92,5 +98,6 @@ if __name__ == '__main__':
     parser.add_argument('source')
     parser.add_argument('destination')
     parser.add_argument('reference')
+    parser.add_argument('--runtime-only', action='store_true')
     args = parser.parse_args()
-    print(json.dumps(convert(args.source, args.destination, args.reference)))
+    print(json.dumps(convert(args.source, args.destination, args.reference, runtime_only=args.runtime_only)))

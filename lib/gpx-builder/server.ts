@@ -2,6 +2,7 @@ import { runtimeUrls } from '../runtime-config.ts';
 import 'server-only';
 
 import { readCmsJson } from '../cms-read.ts';
+import { validStrapiResponse } from '../strapi-response.ts';
 import {
   buildGpxBuilderManifest,
   createDisabledGpxBuilderManifest,
@@ -43,7 +44,7 @@ async function requestStrapiJson<T>(
     token, public: true, revalidate: 'next' in policy ? policy.next.revalidate : 0,
     maximumBytes: STRAPI_RESPONSE_LIMIT_BYTES,
     validate: (value) => requestKind === 'feature-switch'
-      ? (value as { data?: unknown }).data === null || typeof (value as { data?: { gpxBuilderEnabled?: unknown } }).data?.gpxBuilderEnabled === 'boolean'
+      ? validStrapiResponse(value, 'data')
       : Array.isArray((value as { data?: unknown }).data),
   });
 }

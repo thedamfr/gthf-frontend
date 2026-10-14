@@ -195,3 +195,167 @@ test('a delayed global projection cannot reopen content after another projection
   complete(Response.json({ data: { publishCityItinerariesToNext: true } }));
   await assert.rejects(pending, PublicContentUnavailable);
 });
+
+
+test('a first empty unfiltered collection revokes warm details and concurrent projections in its credential scope', async () => {
+  const cache = new PublicContentCache();
+  const options = { public: true, revalidate: 60, cache, token: 'first' };
+  const detail = url + '&filters[slug][$eq]=warm';
+  const published = { data: [{ slug: 'warm', title: 'Withdrawn article' }] };
+  const offline: typeof fetch = async () => { throw new Error('offline'); };
+  await readCmsJson(detail, { ...options, fetchImpl: async () => Response.json(published) });
+  await readCmsJson(detail, { ...options, token: 'other', fetchImpl: async () => Response.json(published) });
+  let complete!: (response: Response) => void;
+  const pending = readCmsJson(detail + '&populate=seo', {
+    ...options, fetchImpl: () => new Promise((resolve) => { complete = resolve; }),
+  });
+  const listing = url + '&fields[0]=slug&pagination[page]=1&pagination[pageSize]=20';
+  assert.deepEqual(await readCmsJson(listing, { ...options, fetchImpl: async () => Response.json({ data: [] }) }), { data: [] });
+  complete(Response.json(published));
+  await assert.rejects(pending, PublicContentUnavailable);
+  await assert.rejects(readCmsJson(detail, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+  assert.deepEqual(await readCmsJson(listing, { ...options, fetchImpl: offline }), { data: [] });
+  assert.deepEqual(await readCmsJson(detail, { ...options, token: 'other', fetchImpl: offline }), published);
+});
+
+test('empty later pages and constrained collections do not revoke unrelated warm details', async () => {
+  for (const query of ['pagination[page]=2', 'pagination[start]=20', 'filters[category][slug][$eq]=other', '_q=absent', 'locale=fr']) {
+    const cache = new PublicContentCache();
+    const options = { public: true, revalidate: 60, cache };
+    const detail = url + '&filters[slug][$eq]=warm';
+    const published = { data: [{ slug: 'warm' }] };
+    await readCmsJson(detail, { ...options, fetchImpl: async () => Response.json(published) });
+    await readCmsJson(url + '&' + query, { ...options, fetchImpl: async () => Response.json({ data: [] }) });
+    assert.deepEqual(await readCmsJson(detail, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), published);
+  }
+});
+
+
+for (const field of ['publishCityItinerariesToNext', 'gpxBuilderEnabled']) {
+  for (const closingProjection of ['full', 'partial']) test(`global ${field} closure through ${closingProjection} revokes stale overlapping projections`, async () => {
+    const cache = new PublicContentCache(); const options = { public: true, revalidate: 0, cache };
+    const base = 'http://cms.test/api/global?status=published';
+    const partial = base + '&fields[0]=' + field;
+    const full = base + '&populate[0]=favicon&populate[1]=defaultSeo.shareImage';
+    const open = { data: { id: 1, documentId: 'global', siteName: 'GTHF', [field]: true } };
+    await readCmsJson(full, { ...options, fetchImpl: async () => Response.json(open) });
+    await readCmsJson(partial, { ...options, fetchImpl: async () => Response.json({ data: { id: 1, documentId: 'global', [field]: true } }) });
+    const closedUrl = closingProjection === 'full' ? full : partial;
+    const staleUrl = closingProjection === 'full' ? partial : full;
+    const closed = closingProjection === 'full' ? { data: { ...open.data, [field]: false } } : { data: { id: 1, documentId: 'global', [field]: false } };
+    await readCmsJson(closedUrl, { ...options, fetchImpl: async () => Response.json(closed) });
+    const offline: typeof fetch = async () => { throw new Error('offline'); };
+    assert.deepEqual(await readCmsJson(closedUrl, { ...options, fetchImpl: offline }), closed);
+    await assert.rejects(readCmsJson(staleUrl, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+  });
+}
+
+test('global field authority preserves independent switches and identity despite another field and envelope timestamps changing', async () => {
+  const cache = new PublicContentCache(); const options = { public: true, revalidate: 0, cache };
+  const base = 'http://cms.test/api/global?status=published';
+  const catalogue = base + '&fields[0]=publishCityItinerariesToNext&fields[1]=updatedAt';
+  const builder = base + '&fields[0]=gpxBuilderEnabled';
+  const identity = base + '&fields[0]=siteName';
+  const old = { data: { id: 1, documentId: 'global', siteName: 'GTHF', publishCityItinerariesToNext: true, gpxBuilderEnabled: true, updatedAt: '2026-10-13T20:00:00Z' } };
+  await readCmsJson(base, { ...options, fetchImpl: async () => Response.json(old) });
+  const publishedCatalogue = { data: { id: 1, documentId: 'global', publishCityItinerariesToNext: true, updatedAt: old.data.updatedAt } };
+  await readCmsJson(catalogue, { ...options, fetchImpl: async () => Response.json(publishedCatalogue) });
+  await readCmsJson(builder, { ...options, fetchImpl: async () => Response.json({ data: { gpxBuilderEnabled: true } }) });
+  const publishedIdentity = { data: { siteName: 'GTHF' } };
+  await readCmsJson(identity, { ...options, fetchImpl: async () => Response.json(publishedIdentity) });
+  const changed = { data: { ...old.data, gpxBuilderEnabled: false, updatedAt: '2026-10-13T21:00:00Z' } };
+  await readCmsJson(base, { ...options, fetchImpl: async () => Response.json(changed) });
+  const offline: typeof fetch = async () => { throw new Error('offline'); };
+  assert.deepEqual(await readCmsJson(catalogue, { ...options, fetchImpl: offline }), publishedCatalogue);
+  assert.deepEqual(await readCmsJson(identity, { ...options, fetchImpl: offline }), publishedIdentity);
+  await assert.rejects(readCmsJson(builder, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+});
+
+test('a global closure invalidates an overlapping old response already in flight and stays scoped to credentials', async () => {
+  const cache = new PublicContentCache(); const options = { public: true, revalidate: 0, cache, token: 'first' };
+  const base = 'http://cms.test/api/global?status=published';
+  const flag = base + '&fields[0]=publishCityItinerariesToNext';
+  const open = { data: { publishCityItinerariesToNext: true } };
+  await readCmsJson(flag, { ...options, fetchImpl: async () => Response.json(open) });
+  await readCmsJson(flag, { ...options, token: 'other', fetchImpl: async () => Response.json(open) });
+  let complete!: (response: Response) => void;
+  const pending = readCmsJson(flag + '&populate[0]=favicon', { ...options,
+    fetchImpl: () => new Promise((resolve) => { complete = resolve; }) });
+  await readCmsJson(base, { ...options, fetchImpl: async () => Response.json({ data: { publishCityItinerariesToNext: false } }) });
+  complete(Response.json(open));
+  await assert.rejects(pending, PublicContentUnavailable);
+  const offline: typeof fetch = async () => { throw new Error('offline'); };
+  await assert.rejects(readCmsJson(flag, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+  assert.deepEqual(await readCmsJson(flag, { ...options, token: 'other', fetchImpl: offline }), open);
+});
+
+
+test('the first confirmed global closure defeats an older in-flight value before any cache was warm', async () => {
+  const cache = new PublicContentCache(); const options = { public: true, revalidate: 0, cache };
+  const base = 'http://cms.test/api/global?status=published';
+  let complete!: (response: Response) => void;
+  const pending = readCmsJson(base + '&fields[0]=publishCityItinerariesToNext', { ...options,
+    fetchImpl: () => new Promise((resolve) => { complete = resolve; }) });
+  const closed = { data: { publishCityItinerariesToNext: false } };
+  await readCmsJson(base, { ...options, fetchImpl: async () => Response.json(closed) });
+  complete(Response.json({ data: { publishCityItinerariesToNext: true } }));
+  await assert.rejects(pending, PublicContentUnavailable);
+  assert.deepEqual(await readCmsJson(base, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), closed);
+});
+
+test('simultaneous independent global fields and agreeing closed projections stay admissible', async () => {
+  const cache = new PublicContentCache(); const options = { public: true, revalidate: 0, cache };
+  const base = 'http://cms.test/api/global?status=published';
+  let completeIdentity!: (response: Response) => void; let completeFull!: (response: Response) => void;
+  const identity = readCmsJson(base + '&fields[0]=siteName', { ...options,
+    fetchImpl: () => new Promise((resolve) => { completeIdentity = resolve; }) });
+  const full = readCmsJson(base, { ...options,
+    fetchImpl: () => new Promise((resolve) => { completeFull = resolve; }) });
+  const closed = { data: { publishCityItinerariesToNext: false } };
+  await readCmsJson(base + '&fields[0]=publishCityItinerariesToNext', { ...options, fetchImpl: async () => Response.json(closed) });
+  completeIdentity(Response.json({ data: { siteName: 'GTHF' } }));
+  assert.deepEqual(await identity, { data: { siteName: 'GTHF' } });
+  const complete = { data: { siteName: 'GTHF', publishCityItinerariesToNext: false, gpxBuilderEnabled: true } };
+  completeFull(Response.json(complete)); assert.deepEqual(await full, complete);
+  // A later successful explicit reopening is allowed; only older in-flight
+  // contradictions are refused, not intentional subsequent publications.
+  const reopened = { data: { publishCityItinerariesToNext: true } };
+  assert.deepEqual(await readCmsJson(base + '&fields[0]=publishCityItinerariesToNext', { ...options, fetchImpl: async () => Response.json(reopened) }), reopened);
+});
+
+for (const field of ['publishCityItinerariesToNext', 'gpxBuilderEnabled']) {
+  test(`a successful missing or invalid ${field} closes warm projections and remains closed during an outage`, async () => {
+    for (const projection of ['partial', 'full']) for (const data of [{}, { [field]: null }, { [field]: 'true' }, { [field]: 1 }]) {
+      const cache = new PublicContentCache();
+      const options = { public: true, revalidate: 0, cache, validate: (value: unknown) => validStrapiResponse(value, 'data') };
+      const full = 'http://cms.test/api/global?status=published';
+      const partial = full + '&fields[0]=' + field;
+      const open = { data: { [field]: true } };
+      await readCmsJson(full, { ...options, fetchImpl: async () => Response.json(open) });
+      await readCmsJson(partial, { ...options, fetchImpl: async () => Response.json(open) });
+      const closedUrl = projection === 'full' ? full : partial;
+      const staleUrl = projection === 'full' ? partial : full;
+      const confirmed = { data };
+      assert.deepEqual(await readCmsJson(closedUrl, { ...options, fetchImpl: async () => Response.json(confirmed) }), confirmed);
+      const offline: typeof fetch = async () => { throw new Error('offline'); };
+      assert.deepEqual(await readCmsJson(closedUrl, { ...options, fetchImpl: offline }), confirmed);
+      await assert.rejects(readCmsJson(staleUrl, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+    }
+  });
+
+  test(`a missing ${field} defeats an older in-flight true without treating an unrelated projection as closure`, async () => {
+    const cache = new PublicContentCache(); const options = { public: true, revalidate: 0, cache };
+    const base = 'http://cms.test/api/global?status=published'; const partial = base + '&fields[0]=' + field;
+    const open = { data: { [field]: true } };
+    await readCmsJson(partial, { ...options, fetchImpl: async () => Response.json(open) });
+    await readCmsJson(base + '&fields[0]=siteName', { ...options, fetchImpl: async () => Response.json({ data: {} }) });
+    // This fresh read proves the unrelated projection kept the prior authority.
+    assert.deepEqual(await readCmsJson(partial, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), open);
+    let complete!: (response: Response) => void;
+    const pending = readCmsJson(partial + '&populate=favicon', { ...options,
+      fetchImpl: () => new Promise((resolve) => { complete = resolve; }) });
+    await readCmsJson(base, { ...options, fetchImpl: async () => Response.json({ data: {} }) });
+    complete(Response.json(open)); await assert.rejects(pending, PublicContentUnavailable);
+    await assert.rejects(readCmsJson(partial, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), PublicContentUnavailable);
+  });
+}

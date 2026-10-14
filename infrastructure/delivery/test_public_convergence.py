@@ -1,6 +1,8 @@
 import contextlib
 import importlib.util
 import json
+import copy
+import types
 import pathlib
 import unittest
 from unittest.mock import patch
@@ -83,6 +85,95 @@ class PublicConvergenceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'expected digest'):
                 release.verify_components('staging', {'frontend': VALUE})
             public.assert_not_called()
+
+
+class InfrastructureConvergenceEvidenceTests(unittest.TestCase):
+    def activate_fixture(self, persistent_old_revision):
+        previous = {'components': {'frontend': {**VALUE, 'revision': OLD_REVISION, 'image': 'previous'}, 'cms': {'image': 'cms'}}}
+        candidate = {'owner': 'test', 'deployerRevision': REVISION, 'plan': {'infrastructure': True},
+                     'components': {'frontend': {**VALUE, 'processedRevision': REVISION}}}
+        resources = [
+            {'kind': 'ConfigMap', 'metadata': {'name': 'gthf-config', 'namespace': 'gthf-staging'}, 'data': {}},
+            {'kind': 'Deployment', 'metadata': {'name': 'gthf-frontend', 'namespace': 'gthf-staging'},
+             'spec': {'template': {'metadata': {}, 'spec': {'containers': [{'name': 'frontend', 'image': 'previous',
+                       'readinessProbe': {'httpGet': {'path': '/api/ready'}}}]}}}},
+        ]
+        clock = [0]
+        saved = []
+        restored = []
+        actual_verify = release.verify_components
+
+        def verify(environment, components, evidence=None):
+            if components.get('frontend', {}).get('image') == VALUE['image']:
+                return actual_verify(environment, {'frontend': components['frontend']}, evidence=evidence)
+            return evidence if evidence is not None else []
+
+        def kube(environment, *arguments, **kwargs):
+            if arguments[:2] == ('get', 'pods'):
+                running = pod()
+                running['status']['containerStatuses'][0]['imageID'] = 'fixture@' + CONFIG
+                return json.dumps({'items': [running]})
+            return b''
+
+        def command(arguments, **kwargs):
+            if arguments[3:5] == ['kubectl', 'kustomize']:
+                return b'rendered test resources'
+            if arguments[3:6] == ['ctr', 'content', 'get']:
+                return json.dumps({'config': {'digest': CONFIG}} if arguments[-1] == MANIFEST
+                                  else {'config': {'Labels': {'org.opencontainers.image.revision': REVISION}}})
+            if arguments[0] == 'node':
+                return b'recipe passed'
+            raise AssertionError('Unexpected command in synthetic transport')
+
+        def http(url, **kwargs):
+            if '/api/ready' in url:
+                return {'status': 'ready'}
+            return {'status': 'ok', 'revision': OLD_REVISION if persistent_old_revision or clock[0] < 2 else REVISION}
+
+        with contextlib.ExitStack() as mocks:
+            # Only infrastructure I/O and time are synthetic; activate,
+            # reconcile and both delivery verification functions are real.
+            mocks.enter_context(patch.dict('sys.modules', {'yaml': types.SimpleNamespace(safe_load_all=lambda _: copy.deepcopy(resources))}))
+            for name, replacement in {
+                'environment_lock': lambda *args: contextlib.nullcontext(),
+                'require_current': lambda *args: None,
+                'load_json': lambda path: copy.deepcopy(previous),
+                'snapshot_components': lambda *args: {'frontend': {'spec': {'proof': 'previous'}}},
+                'command': command, 'kubectl': kube, 'http_json': http, 'verify_components': verify,
+                'restore_infrastructure': lambda *args, **kwargs: restored.append(args),
+                'save_json': lambda path, value: saved.append((path, copy.deepcopy(value))),
+            }.items():
+                mocks.enter_context(patch.object(release, name, replacement))
+            mocks.enter_context(patch.object(release.time, 'monotonic', lambda: clock[0]))
+            mocks.enter_context(patch.object(release.time, 'sleep', lambda delay: clock.__setitem__(0, clock[0] + delay)))
+            if persistent_old_revision:
+                with self.assertRaisesRegex(RuntimeError, 'within 90 seconds'):
+                    release.activate(pathlib.Path('/unused'), 'production', candidate, pathlib.Path('/unused/recipe'))
+            else:
+                release.activate(pathlib.Path('/unused'), 'production', candidate, pathlib.Path('/unused/recipe'))
+        return saved, restored, clock[0]
+
+    def test_infrastructure_success_preserves_intermediate_old_revisions_in_saved_report(self):
+        saved, restored, elapsed = self.activate_fixture(False)
+        reports = [value for path, value in saved if path.name == 'production.json']
+        self.assertEqual(len(reports), 1)
+        observations = reports[0]['componentVerification'][0]['observations']
+        self.assertEqual([value['revision'] for value in observations], [OLD_REVISION, OLD_REVISION, REVISION])
+        self.assertTrue(observations[-1]['dependenciesReady'])
+        self.assertEqual(elapsed, 2)
+        self.assertEqual(restored, [])
+
+    def test_infrastructure_failure_retains_all_90_seconds_before_rollback_and_never_advances(self):
+        saved, restored, elapsed = self.activate_fixture(True)
+        self.assertFalse(any(path.name == 'production.json' for path, value in saved))
+        report = saved[-1][1]
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['rollback'], 'verified')
+        self.assertEqual(len(restored), 1)
+        observations = report['componentVerification'][0]['observations']
+        self.assertEqual(len(observations), 90)
+        self.assertTrue(all(value['revision'] == OLD_REVISION for value in observations))
+        self.assertEqual(elapsed, 90)
 
 
 if __name__ == '__main__':

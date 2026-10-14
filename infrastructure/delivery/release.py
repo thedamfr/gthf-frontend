@@ -200,9 +200,13 @@ def source_equivalent(root, name, value):
     return inputs(value['revision']) == inputs(value['processedRevision']) == value['fingerprints']['runtime']
 
 
-def require_image_revision(config, revision):
+def require_image_revision(config, revision, component=None):
     if config.get('config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != revision:
         raise ValueError('Image revision does not match its immutable OCI label')
+    if component == 'cms' and config.get('config', {}).get('Labels', {}).get('io.gthf.media-recovery') != '2':
+        raise ValueError('Candidate CMS requires media recovery version 2 to preserve referenced history')
+    if component == 'cms' and config.get('config', {}).get('Labels', {}).get('io.gthf.media-batch-recovery') != '1':
+        raise ValueError('Candidate CMS requires durable media batch recovery version 1')
 
 
 def verify_registry_components(root, components):
@@ -216,7 +220,7 @@ def verify_registry_components(root, components):
         for name, value in components.items():
             validate_component(name, value)
             image = json.loads(command(['docker', '--config', directory, 'buildx', 'imagetools', 'inspect', value['image'], '--format', '{{json .Image}}'], timeout=120))
-            require_image_revision(image, value['revision'])
+            require_image_revision(image, value['revision'], name)
 
 
 class NoReleaseRedirect(urllib.request.HTTPRedirectHandler):
@@ -287,6 +291,86 @@ def verify_public_revision(environment, name, value, evidence):
     raise RuntimeError('Public endpoint did not converge to the expected release within 90 seconds')
 
 
+def runtime_image_proof(image_id, manifest_digest, config_digest, revision, cache=None):
+    """Resolve CRI's alternate RepoDigest by the exact executable OCI graph."""
+    cache = {} if cache is None else cache
+    maximum = 16 * 1024 * 1024
+    indexes = {'application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json'}
+    manifests = {'application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json'}
+    configs = {'application/vnd.oci.image.config.v1+json', 'application/vnd.docker.container.image.v1+json'}
+
+    def require(condition, message):
+        if not condition:
+            raise RuntimeError('Runtime image digest is not the expected digest: ' + message)
+
+    def digest(value):
+        require(isinstance(value, str) and re.fullmatch(r'sha256:[a-f0-9]{64}', value), 'SHA256 required')
+
+    digest(manifest_digest)
+    digest(config_digest)
+    matched = re.search(r'(?:^|@|://)(sha256:[a-f0-9]{64})$', image_id) if isinstance(image_id, str) else None
+    require(matched is not None, 'Malformed runtime image ID')
+    observed = matched[1]
+    if observed in (manifest_digest, config_digest):
+        return {'kind': 'pinned-digest', 'observedDigest': observed}
+
+    def descriptor(value):
+        require(isinstance(value, dict), 'OCI descriptor required')
+        digest(value.get('digest'))
+        require(type(value.get('size')) is int and 0 < value['size'] <= maximum, 'Bounded OCI metadata descriptor required')
+
+    def metadata(value, size=None):
+        digest(value)
+        if value not in cache:
+            data = command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', value], timeout=5)
+            require(isinstance(data, bytes) and 0 < len(data) <= maximum, 'Bounded OCI metadata bytes required')
+            require('sha256:' + hashlib.sha256(data).hexdigest() == value, 'OCI metadata SHA256 mismatch')
+            try:
+                document = json.loads(data)
+            except (ValueError, UnicodeError):
+                raise RuntimeError('Runtime image digest is not the expected digest: Invalid OCI JSON') from None
+            require(isinstance(document, dict), 'OCI metadata object required')
+            cache[value] = (data, document)
+        data, document = cache[value]
+        if size is not None:
+            require(len(data) == size, 'OCI descriptor size mismatch')
+        return document
+
+    index = metadata(observed)
+    require(index.get('schemaVersion') == 2 and index.get('mediaType') in indexes
+            and isinstance(index.get('manifests'), list), 'Unknown image ID must be an OCI index')
+    candidates = [item for item in index['manifests'] if isinstance(item, dict)
+                  and isinstance(item.get('platform'), dict) and item['platform'].get('os') == 'linux'
+                  and item['platform'].get('architecture') == 'amd64']
+    require(len(candidates) == 1, 'Exactly one Linux amd64 runtime required')
+    runtime = candidates[0]
+    descriptor(runtime)
+    require(runtime.get('mediaType') in manifests and runtime['digest'] == manifest_digest,
+            'Alias must point to the exact runtime manifest')
+    manifest = metadata(runtime['digest'], runtime['size'])
+    require(manifest.get('schemaVersion') == 2 and manifest.get('mediaType') == runtime['mediaType']
+            and isinstance(manifest.get('layers'), list), 'Executable OCI manifest required')
+    descriptor(manifest.get('config'))
+    require(manifest['config'].get('mediaType') in configs and manifest['config']['digest'] == config_digest,
+            'Alias must point to the exact runtime configuration')
+    config = metadata(config_digest, manifest['config']['size'])
+    require(config.get('os') == 'linux' and config.get('architecture') == 'amd64', 'Runtime platform differs')
+    require_image_revision(config, revision)
+    rootfs = config.get('rootfs', {})
+    require(isinstance(rootfs, dict) and rootfs.get('type') == 'layers' and isinstance(rootfs.get('diff_ids'), list)
+            and len(rootfs['diff_ids']) == len(manifest['layers']), 'Runtime layer identity differs')
+    for value in rootfs['diff_ids']:
+        digest(value)
+    for layer in manifest['layers']:
+        require(isinstance(layer, dict), 'Layer descriptor required')
+        digest(layer.get('digest'))
+        require(type(layer.get('size')) is int and layer['size'] >= 0, 'Layer size required')
+    return {'kind': 'verified-runtime-index-alias', 'observedDigest': observed,
+            'runtimeManifestDigest': manifest_digest, 'runtimeConfigDigest': config_digest,
+            'platform': 'linux/amd64', 'revision': revision,
+            'layerDigests': [layer['digest'] for layer in manifest['layers']]}
+
+
 def verify_components(environment, components, evidence=None):
     if evidence is None:
         evidence = []
@@ -305,16 +389,26 @@ def verify_components(environment, components, evidence=None):
             raise RuntimeError('The release must reference a single-platform manifest')
         config = json.loads(command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', config_digest]))
         require_image_revision(config, value['revision'])
+        runtime_metadata = {}
         for pod in running:
             containers = pod['spec']['containers'] + pod['spec'].get('initContainers', [])
             if any(container['image'] != value['image'] for container in containers):
                 raise RuntimeError('Runtime and init-container images do not match the release')
             statuses = pod['status'].get('containerStatuses', [])
-            if not statuses or any(not state.get('ready') or state.get('imageID', '').split('@')[-1] not in (manifest_digest, config_digest) for state in statuses):
-                raise RuntimeError('Running image digest is not the expected digest')
+            if not statuses or any(not state.get('ready') for state in statuses):
+                raise RuntimeError('Running image digest is not the expected digest or the container is not ready')
+            proof = {'podUid': pod['metadata'].get('uid'), 'containers': [], 'initContainers': []}
+            verification.setdefault('runtimeImages', []).append(proof)
+            for state in statuses:
+                identity = {'name': state.get('name'), 'imageID': state.get('imageID')}
+                proof['containers'].append(identity)
+                identity.update(runtime_image_proof(state.get('imageID'), manifest_digest, config_digest, value['revision'], runtime_metadata))
             for state in pod['status'].get('initContainerStatuses', []):
-                if state.get('imageID', '').split('@')[-1] not in (manifest_digest, config_digest) or state.get('state', {}).get('terminated', {}).get('exitCode') != 0:
+                if state.get('state', {}).get('terminated', {}).get('exitCode') != 0:
                     raise RuntimeError('The init-container did not complete with the expected image')
+                identity = {'name': state.get('name'), 'imageID': state.get('imageID')}
+                proof['initContainers'].append(identity)
+                identity.update(runtime_image_proof(state.get('imageID'), manifest_digest, config_digest, value['revision'], runtime_metadata))
         if name == 'gateway':
             continue
         verify_public_revision(environment, name, value, verification['observations'])
@@ -344,7 +438,7 @@ def cms_rollout_policy(previous, deployment):
             or template['metadata'].get('annotations', {}).get('gthf.fr/source-revision') != previous['revision']):
         raise RuntimeError('Current CMS deployment does not match the previous verified release')
     proof = image_capability(previous['image'], previous['revision'], command)
-    return {**proof, 'strategy': 'Recreate' if proof['mediaRecoveryVersion'] == '0' else 'RollingUpdate'}
+    return {**proof, 'strategy': 'RollingUpdate' if proof['mediaRecoveryVersion'] == '2' and proof['mediaBatchRecoveryVersion'] == '1' else 'Recreate'}
 
 
 def configure_cms_strategy(spec, strategy):
@@ -418,7 +512,7 @@ def backup_database(root):
     return str(path)
 
 
-def reconcile_infrastructure(environment, components, cms_strategy='RollingUpdate', monitor=None):
+def reconcile_infrastructure(environment, components, cms_strategy='RollingUpdate', monitor=None, evidence=None):
     import yaml
     overlay = pathlib.Path(__file__).parent.parent / 'kubernetes' / 'overlays' / ('production' if environment == 'production' else 'qualification')
     rendered = command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', 'kustomize', str(overlay)])
@@ -469,7 +563,7 @@ def reconcile_infrastructure(environment, components, cms_strategy='RollingUpdat
                     kubectl(environment, 'rollout', 'status', 'deployment/' + name, '--timeout=300s')
                     if name != 'gthf-staging-gateway':
                         component = 'cms' if name == 'gthf-cms' else 'frontend'
-                        verify_components(environment, {component: components[component]})
+                        verify_components(environment, {component: components[component]}, evidence=evidence)
     except Exception:
         restore_infrastructure(environment, previous)
         raise
@@ -544,7 +638,8 @@ def activate(root, environment, candidate, recipe):
                 time.sleep(10)
                 monitor.require_available()
             if candidate.get('plan', {}).get('infrastructure'):
-                infrastructure_snapshot = reconcile_infrastructure(environment, combined, cms_strategy=cms_strategy, monitor=monitor)
+                infrastructure_snapshot = reconcile_infrastructure(environment, combined, cms_strategy=cms_strategy, monitor=monitor,
+                                                                   evidence=report.setdefault('componentVerification', []))
             names = ('frontend', 'cms', 'gateway') if cms_strategy == 'Recreate' else ('cms', 'frontend', 'gateway')
             for name in names:
                 if name in changed:

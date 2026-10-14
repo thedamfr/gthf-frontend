@@ -5,14 +5,15 @@ import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readFileS
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { EVIDENCE_ROOT, GUEST_ROOT, NAMESPACE, publishedImage, requireRegularPath, validateManifest } from './manifest.mjs';
+import { EVIDENCE_ROOT, GUEST_ROOT, NAMESPACE, publishedImage, requireRegularPath, requireRunId, validateManifest } from './manifest.mjs';
 import { infrastructureLock } from './infra-client.mjs';
+import { requireImageRevision } from '../../infrastructure/delivery/image-proof.mjs';
 import { readBoundedJson, requirePublication } from '../../infrastructure/delivery/publication.mjs';
 
 const { values } = parseArgs({ options: { 'run-id': { type: 'string' }, uuid: { type: 'string' }, 'cms-source': { type: 'string' }, 'published-cms': { type: 'string' }, 'published-frontend': { type: 'string' } }, strict: true });
 assert.equal(Boolean(values['published-cms']), Boolean(values['published-frontend']), 'Both exact CI candidates must be supplied together');
 const published = Boolean(values['published-cms']);
-assert.match(values['run-id'] ?? '', /^gthf-recovery-[a-z0-9-]{1,64}$/);
+requireRunId(values['run-id']);
 assert.match(values.uuid ?? '', /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
 assert.notEqual(infrastructureLock.revision, '0'.repeat(40), 'Infrastructure revision must be reviewed and pinned');
 process.umask(0o077);
@@ -45,13 +46,13 @@ async function checksum(path) {
   for await (const chunk of createReadStream(path)) digest.update(chunk);
   return digest.digest('hex');
 }
-function inspect(ref, revision) {
+function inspect(ref, revision, component) {
   const data = JSON.parse(execFileSync('sudo', ['-n', 'docker', 'image', 'inspect', ref], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }))[0];
   const reference = ref.includes('@') ? data.RepoDigests?.find((item) => item === ref)
     : data.RepoDigests?.find((item) => item.startsWith(ref.split(':')[0] + '@'));
   assert.ok(reference?.includes('@sha256:'), 'Built image must have an immutable repository digest');
-  if (revision) assert.equal(data.Config.Labels['org.opencontainers.image.revision'], revision);
-  return { ref: reference, digest: reference.split('@')[1], imageId: data.Id, ...(revision ? { revision } : {}) };
+  if (revision) requireImageRevision({ config: data.Config }, revision, component);
+  return { ref: reference, digest: reference.split('@')[1], imageId: data.Id, ...(revision ? { revision } : {}), ...(component === 'cms' ? { mediaRecoveryVersion: data.Config.Labels['io.gthf.media-recovery'], mediaBatchRecoveryVersion: data.Config.Labels['io.gthf.media-batch-recovery'] } : {}) };
 }
 const dependencyPath = join(root, 'dependency-images.json');
 let dependencies;
@@ -95,11 +96,11 @@ for (const component of ['cms', 'frontend']) {
     requirePublication(candidate.publication, workflow, component);
     publications[component] = { ...candidate.publication, candidateSha256: await checksum(path), workflowUrl: workflow.html_url };
     await command('pull-' + component, ['sudo', '-n', 'docker', 'pull', reference]);
-    images[component] = inspect(reference, revisions[component]);
+    images[component] = inspect(reference, revisions[component], component);
   } else {
     const tag = 'gthf-' + component + ':recovery-' + revisions[component];
     await command('build-' + component, ['sudo', '-n', 'docker', 'buildx', 'build', '--load', '--tag', tag, '--build-arg', 'GTHF_REVISION=' + revisions[component], '.'], frozen[component]);
-    images[component] = inspect(tag, revisions[component]);
+    images[component] = inspect(tag, revisions[component], component);
   }
 }
 if (!dependencies) {
