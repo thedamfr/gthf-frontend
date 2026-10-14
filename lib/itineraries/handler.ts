@@ -15,7 +15,7 @@ export async function handleItineraryArtifactGet(
   return handleItineraryArtifactGetCore(slug, kind, request, {
     preview: draft.isEnabled,
     getItinerary: getGuardedItineraryBySlug,
-    loadArtifact: loadItineraryArtifact,
+    loadArtifact: (entry, kind) => loadItineraryArtifact(entry, kind, { preview: draft.isEnabled }),
     reportError: console.error,
   });
 }

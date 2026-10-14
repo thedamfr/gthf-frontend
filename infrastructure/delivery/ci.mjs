@@ -58,14 +58,14 @@ if (plan.build) {
   if (!/^sha256:[a-f0-9]{64}$/.test(digest ?? '')) throw new Error('Missing immutable build digest');
   // Inspect the resolved digest, not the tag which may move between requests.
   const imageConfig = JSON.parse(run('docker', ['buildx', 'imagetools', 'inspect', `${imageName}@${digest}`, '--format', '{{json .Image}}']));
-  requireImageRevision(imageConfig, revision);
+  requireImageRevision(imageConfig, revision, component);
   image = `${imageName}@${digest}`;
   imageRevision = revision;
 } else {
   if (!new RegExp(`^${imageName}@sha256:[a-f0-9]{64}$`).test(image ?? '') || !/^[a-f0-9]{40}$/.test(imageRevision ?? '')) throw new Error('Invalid reusable image');
   const sourceInputs = gitFingerprints(repository, imageRevision);
   if (sourceInputs.runtime !== fingerprints.runtime) throw new Error('Reusable image sources are not equivalent');
-  requireImageRevision(JSON.parse(run('docker', ['buildx', 'imagetools', 'inspect', image, '--format', '{{json .Image}}'])), imageRevision);
+  requireImageRevision(JSON.parse(run('docker', ['buildx', 'imagetools', 'inspect', image, '--format', '{{json .Image}}'])), imageRevision, component);
 }
 const schemas = {};
 if (component === 'cms') {

@@ -102,10 +102,10 @@ spec:
             failureThreshold: 30
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: /api/serving
               port: http
             periodSeconds: 5
-            timeoutSeconds: 3
+            timeoutSeconds: 5
             failureThreshold: 4
           livenessProbe:
             httpGet:

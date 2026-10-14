@@ -107,8 +107,8 @@ def command(arguments, *, data=None, timeout=600):
     return result.stdout
 
 
-def kubectl(environment, *arguments, data=None):
-    return command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', '-n', NAMESPACES[environment], *arguments], data=data)
+def kubectl(environment, *arguments, data=None, timeout=600):
+    return command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', '-n', NAMESPACES[environment], *arguments], data=data, timeout=timeout)
 
 
 def save_json(path, value):
@@ -200,9 +200,13 @@ def source_equivalent(root, name, value):
     return inputs(value['revision']) == inputs(value['processedRevision']) == value['fingerprints']['runtime']
 
 
-def require_image_revision(config, revision):
+def require_image_revision(config, revision, component=None):
     if config.get('config', {}).get('Labels', {}).get('org.opencontainers.image.revision') != revision:
         raise ValueError('Image revision does not match its immutable OCI label')
+    if component == 'cms' and config.get('config', {}).get('Labels', {}).get('io.gthf.media-recovery') != '2':
+        raise ValueError('Candidate CMS requires media recovery version 2 to preserve referenced history')
+    if component == 'cms' and config.get('config', {}).get('Labels', {}).get('io.gthf.media-batch-recovery') != '1':
+        raise ValueError('Candidate CMS requires durable media batch recovery version 1')
 
 
 def verify_registry_components(root, components):
@@ -216,7 +220,7 @@ def verify_registry_components(root, components):
         for name, value in components.items():
             validate_component(name, value)
             image = json.loads(command(['docker', '--config', directory, 'buildx', 'imagetools', 'inspect', value['image'], '--format', '{{json .Image}}'], timeout=120))
-            require_image_revision(image, value['revision'])
+            require_image_revision(image, value['revision'], name)
 
 
 class NoReleaseRedirect(urllib.request.HTTPRedirectHandler):
@@ -225,13 +229,13 @@ class NoReleaseRedirect(urllib.request.HTTPRedirectHandler):
         raise RuntimeError('Release proof cannot redirect to another endpoint')
 
 
-def http_json(url):
+def http_json(url, timeout=30):
     headers = {'Cache-Control': 'no-cache', 'User-Agent': 'gthf-delivery'}
     if any(url.startswith(origin + '/') for origin in HOSTS['staging'].values()):
         credentials = load_json(pathlib.Path('/home/ubuntu/gthf-delivery/staging-access.json'))
         headers['Authorization'] = 'Basic ' + base64.b64encode(('recette:' + credentials['gatewayPassword']).encode()).decode()
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.build_opener(NoReleaseRedirect()).open(request, timeout=30) as response:
+    with urllib.request.build_opener(NoReleaseRedirect()).open(request, timeout=timeout) as response:
         if 'no-store' not in response.headers.get('Cache-Control', ''):
             raise RuntimeError('Release proof can be cached')
         return json.load(response)
@@ -239,11 +243,140 @@ def http_json(url):
 
 def serving_deployment_pods(pods):
     return [pod for pod in pods if not pod['metadata'].get('deletionTimestamp')
+            and pod.get('status', {}).get('phase') not in ('Succeeded', 'Failed')
             and any(owner.get('kind') == 'ReplicaSet' for owner in pod['metadata'].get('ownerReferences', []))]
 
 
-def verify_components(environment, components):
+def verify_public_revision(environment, name, value, evidence):
+    """Allow draining old processes/connections to converge, never advance on a stale proof."""
+    deadline = time.monotonic() + 90
+    path = '/api/health' if name == 'frontend' else '/api/release'
+    while time.monotonic() < deadline:
+        pods = json.loads(kubectl(environment, 'get', 'pods', '-l', 'app.kubernetes.io/component=' + name, '-o', 'json', timeout=min(5, deadline - time.monotonic())))['items']
+        old = [pod for pod in pods if pod.get('status', {}).get('phase') not in ('Succeeded', 'Failed')
+               and any(owner.get('kind') == 'ReplicaSet' for owner in pod['metadata'].get('ownerReferences', []))
+               and any(container['image'] != value['image'] for container in pod['spec']['containers'] + pod['spec'].get('initContainers', []))]
+        observation = {'checkedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                       'oldPods': [{'uid': pod['metadata'].get('uid'), 'terminating': bool(pod['metadata'].get('deletionTimestamp'))} for pod in old]}
+        evidence.append(observation)
+        # An unexpected live workload is not a normal rolling-update drain.
+        if any(not pod['metadata'].get('deletionTimestamp') for pod in old):
+            raise RuntimeError('An unexpected old workload remains active after rollout')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            proof = http_json(HOSTS[environment][name] + path + '?release=' + value['revision'], timeout=min(5, remaining))
+            revision = proof.get('revision')
+            observation['revision'] = revision if isinstance(revision, str) and re.fullmatch(r'[a-f0-9]{40}', revision) else 'invalid'
+            observation['expectedRevision'] = proof.get('status') == 'ok' and revision == value['revision']
+            if observation['expectedRevision'] and not old:
+                # Routing admission can remain green on a warm cache during a CMS
+                # outage. A delivery still requires an uncached dependency proof.
+                if name == 'frontend':
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    readiness = http_json(HOSTS[environment][name] + '/api/ready', timeout=min(5, remaining))
+                    observation['dependenciesReady'] = readiness.get('status') == 'ready'
+                    if not observation['dependenciesReady']:
+                        raise RuntimeError('Frontend dependencies are not ready for delivery')
+                return
+        except (OSError, ValueError) as error:
+            # Keep only the exception type, never URLs/credentials or response bodies.
+            observation['transportError'] = type(error).__name__
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(1, remaining))
+    raise RuntimeError('Public endpoint did not converge to the expected release within 90 seconds')
+
+
+def runtime_image_proof(image_id, manifest_digest, config_digest, revision, cache=None):
+    """Resolve CRI's alternate RepoDigest by the exact executable OCI graph."""
+    cache = {} if cache is None else cache
+    maximum = 16 * 1024 * 1024
+    indexes = {'application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json'}
+    manifests = {'application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json'}
+    configs = {'application/vnd.oci.image.config.v1+json', 'application/vnd.docker.container.image.v1+json'}
+
+    def require(condition, message):
+        if not condition:
+            raise RuntimeError('Runtime image digest is not the expected digest: ' + message)
+
+    def digest(value):
+        require(isinstance(value, str) and re.fullmatch(r'sha256:[a-f0-9]{64}', value), 'SHA256 required')
+
+    digest(manifest_digest)
+    digest(config_digest)
+    matched = re.search(r'(?:^|@|://)(sha256:[a-f0-9]{64})$', image_id) if isinstance(image_id, str) else None
+    require(matched is not None, 'Malformed runtime image ID')
+    observed = matched[1]
+    if observed in (manifest_digest, config_digest):
+        return {'kind': 'pinned-digest', 'observedDigest': observed}
+
+    def descriptor(value):
+        require(isinstance(value, dict), 'OCI descriptor required')
+        digest(value.get('digest'))
+        require(type(value.get('size')) is int and 0 < value['size'] <= maximum, 'Bounded OCI metadata descriptor required')
+
+    def metadata(value, size=None):
+        digest(value)
+        if value not in cache:
+            data = command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', value], timeout=5)
+            require(isinstance(data, bytes) and 0 < len(data) <= maximum, 'Bounded OCI metadata bytes required')
+            require('sha256:' + hashlib.sha256(data).hexdigest() == value, 'OCI metadata SHA256 mismatch')
+            try:
+                document = json.loads(data)
+            except (ValueError, UnicodeError):
+                raise RuntimeError('Runtime image digest is not the expected digest: Invalid OCI JSON') from None
+            require(isinstance(document, dict), 'OCI metadata object required')
+            cache[value] = (data, document)
+        data, document = cache[value]
+        if size is not None:
+            require(len(data) == size, 'OCI descriptor size mismatch')
+        return document
+
+    index = metadata(observed)
+    require(index.get('schemaVersion') == 2 and index.get('mediaType') in indexes
+            and isinstance(index.get('manifests'), list), 'Unknown image ID must be an OCI index')
+    candidates = [item for item in index['manifests'] if isinstance(item, dict)
+                  and isinstance(item.get('platform'), dict) and item['platform'].get('os') == 'linux'
+                  and item['platform'].get('architecture') == 'amd64']
+    require(len(candidates) == 1, 'Exactly one Linux amd64 runtime required')
+    runtime = candidates[0]
+    descriptor(runtime)
+    require(runtime.get('mediaType') in manifests and runtime['digest'] == manifest_digest,
+            'Alias must point to the exact runtime manifest')
+    manifest = metadata(runtime['digest'], runtime['size'])
+    require(manifest.get('schemaVersion') == 2 and manifest.get('mediaType') == runtime['mediaType']
+            and isinstance(manifest.get('layers'), list), 'Executable OCI manifest required')
+    descriptor(manifest.get('config'))
+    require(manifest['config'].get('mediaType') in configs and manifest['config']['digest'] == config_digest,
+            'Alias must point to the exact runtime configuration')
+    config = metadata(config_digest, manifest['config']['size'])
+    require(config.get('os') == 'linux' and config.get('architecture') == 'amd64', 'Runtime platform differs')
+    require_image_revision(config, revision)
+    rootfs = config.get('rootfs', {})
+    require(isinstance(rootfs, dict) and rootfs.get('type') == 'layers' and isinstance(rootfs.get('diff_ids'), list)
+            and len(rootfs['diff_ids']) == len(manifest['layers']), 'Runtime layer identity differs')
+    for value in rootfs['diff_ids']:
+        digest(value)
+    for layer in manifest['layers']:
+        require(isinstance(layer, dict), 'Layer descriptor required')
+        digest(layer.get('digest'))
+        require(type(layer.get('size')) is int and layer['size'] >= 0, 'Layer size required')
+    return {'kind': 'verified-runtime-index-alias', 'observedDigest': observed,
+            'runtimeManifestDigest': manifest_digest, 'runtimeConfigDigest': config_digest,
+            'platform': 'linux/amd64', 'revision': revision,
+            'layerDigests': [layer['digest'] for layer in manifest['layers']]}
+
+
+def verify_components(environment, components, evidence=None):
+    if evidence is None:
+        evidence = []
     for name, value in components.items():
+        verification = {'component': name, 'revision': value['revision'], 'observations': []}
+        evidence.append(verification)
         kubectl(environment, 'rollout', 'status', 'deployment/' + deployment_name(name), '--timeout=300s')
         pods = json.loads(kubectl(environment, 'get', 'pods', '-l', 'app.kubernetes.io/component=' + name, '-o', 'json'))
         running = serving_deployment_pods(pods['items'])
@@ -256,22 +389,30 @@ def verify_components(environment, components):
             raise RuntimeError('The release must reference a single-platform manifest')
         config = json.loads(command(['sudo', '-n', '/snap/bin/microk8s', 'ctr', 'content', 'get', config_digest]))
         require_image_revision(config, value['revision'])
+        runtime_metadata = {}
         for pod in running:
             containers = pod['spec']['containers'] + pod['spec'].get('initContainers', [])
             if any(container['image'] != value['image'] for container in containers):
                 raise RuntimeError('Runtime and init-container images do not match the release')
             statuses = pod['status'].get('containerStatuses', [])
-            if not statuses or any(not state.get('ready') or state.get('imageID', '').split('@')[-1] not in (manifest_digest, config_digest) for state in statuses):
-                raise RuntimeError('Running image digest is not the expected digest')
+            if not statuses or any(not state.get('ready') for state in statuses):
+                raise RuntimeError('Running image digest is not the expected digest or the container is not ready')
+            proof = {'podUid': pod['metadata'].get('uid'), 'containers': [], 'initContainers': []}
+            verification.setdefault('runtimeImages', []).append(proof)
+            for state in statuses:
+                identity = {'name': state.get('name'), 'imageID': state.get('imageID')}
+                proof['containers'].append(identity)
+                identity.update(runtime_image_proof(state.get('imageID'), manifest_digest, config_digest, value['revision'], runtime_metadata))
             for state in pod['status'].get('initContainerStatuses', []):
-                if state.get('imageID', '').split('@')[-1] not in (manifest_digest, config_digest) or state.get('state', {}).get('terminated', {}).get('exitCode') != 0:
+                if state.get('state', {}).get('terminated', {}).get('exitCode') != 0:
                     raise RuntimeError('The init-container did not complete with the expected image')
+                identity = {'name': state.get('name'), 'imageID': state.get('imageID')}
+                proof['initContainers'].append(identity)
+                identity.update(runtime_image_proof(state.get('imageID'), manifest_digest, config_digest, value['revision'], runtime_metadata))
         if name == 'gateway':
             continue
-        path = '/api/health' if name == 'frontend' else '/api/release'
-        proof = http_json(HOSTS[environment][name] + path + '?release=' + value['revision'])
-        if proof.get('status') != 'ok' or proof.get('revision') != value['revision']:
-            raise RuntimeError('Public endpoint does not serve the expected release')
+        verify_public_revision(environment, name, value, verification['observations'])
+    return evidence
 
 
 def deployment_name(name):
@@ -289,10 +430,51 @@ def snapshot_components(environment, names):
     return {name: json.loads(kubectl(environment, 'get', 'deployment', deployment_name(name), '-o', 'json')) for name in names}
 
 
-def patch_component(environment, name, value):
+def cms_rollout_policy(previous, deployment):
+    from media_rollback import image_capability
+    template = deployment['spec']['template']
+    containers = template['spec']['containers'] + template['spec'].get('initContainers', [])
+    if (not containers or any(item['image'] != previous['image'] for item in containers)
+            or template['metadata'].get('annotations', {}).get('gthf.fr/source-revision') != previous['revision']):
+        raise RuntimeError('Current CMS deployment does not match the previous verified release')
+    proof = image_capability(previous['image'], previous['revision'], command)
+    return {**proof, 'strategy': 'RollingUpdate' if proof['mediaRecoveryVersion'] == '2' and proof['mediaBatchRecoveryVersion'] == '1' else 'Recreate'}
+
+
+def configure_cms_strategy(spec, strategy):
+    if strategy not in ('Recreate', 'RollingUpdate'):
+        raise ValueError('Unsupported CMS rollout strategy')
+    # JSON merge patches must explicitly remove the old rollingUpdate object.
+    spec['strategy'] = {'type': strategy, 'rollingUpdate': None if strategy == 'Recreate' else {'maxSurge': 1, 'maxUnavailable': 0}}
+
+
+@contextlib.contextmanager
+def observe_cms_transition(monitor, strategy, environment):
+    if strategy == 'Recreate':
+        # The previous frontend cannot survive this deliberate CMS outage.
+        # Admit the cache-capable frontend before stopping the legacy CMS.
+        admission = http_json(HOSTS[environment]['frontend'] + '/api/serving')
+        if admission.get('status') != 'serving':
+            raise RuntimeError('Initial media recovery requires an admitted recovery-capable frontend')
+        if monitor is not None:
+            monitor.warm_frontend()
+    expected = monitor is not None and strategy == 'Recreate'
+    if expected:
+        monitor.begin_cms_transition(maximum_seconds=390)
+    try:
+        yield
+    finally:
+        if expected:
+            monitor.end_cms_transition()
+
+
+def patch_component(environment, name, value, cms_strategy='RollingUpdate'):
     deployment = json.loads(kubectl(environment, 'get', 'deployment', deployment_name(name), '-o', 'json'))
     spec = deployment['spec']
-    spec['strategy'] = {'type': 'RollingUpdate', 'rollingUpdate': {'maxSurge': 1, 'maxUnavailable': 0}}
+    if name == 'cms':
+        configure_cms_strategy(spec, cms_strategy)
+    else:
+        spec['strategy'] = {'type': 'RollingUpdate', 'rollingUpdate': {'maxSurge': 1, 'maxUnavailable': 0}}
     pod = spec['template']['spec']
     for container in pod['containers'] + pod.get('initContainers', []):
         container['image'] = value['image']
@@ -300,7 +482,7 @@ def patch_component(environment, name, value):
     pod['imagePullSecrets'] = [{'name': 'gthf-ghcr'}]
     container = pod['containers'][0]
     container['lifecycle'] = {'preStop': {'exec': {'command': ['node', '-e', 'setTimeout(()=>{},10000)']}}}
-    container['readinessProbe']['httpGet']['path'] = {'frontend': '/api/ready', 'cms': '/api/release', 'gateway': '/_gateway/health'}[name]
+    container['readinessProbe']['httpGet']['path'] = {'frontend': '/api/serving', 'cms': '/api/release', 'gateway': '/_gateway/health'}[name]
     container['readinessProbe']['timeoutSeconds'] = 5
     annotations = spec['template']['metadata'].setdefault('annotations', {})
     annotations['gthf.fr/source-revision'] = value['revision']
@@ -330,7 +512,7 @@ def backup_database(root):
     return str(path)
 
 
-def reconcile_infrastructure(environment, components):
+def reconcile_infrastructure(environment, components, cms_strategy='RollingUpdate', monitor=None, evidence=None):
     import yaml
     overlay = pathlib.Path(__file__).parent.parent / 'kubernetes' / 'overlays' / ('production' if environment == 'production' else 'qualification')
     rendered = command(['sudo', '-n', '/snap/bin/microk8s', 'kubectl', 'kustomize', str(overlay)])
@@ -348,6 +530,8 @@ def reconcile_infrastructure(environment, components):
             component = {'gthf-cms': 'cms', 'gthf-frontend': 'frontend', 'gthf-staging-gateway': 'frontend'}.get(name)
             if not component:
                 raise RuntimeError('Unexpected application deployment')
+            if name == 'gthf-cms':
+                configure_cms_strategy(resource['spec'], cms_strategy)
             pod = resource['spec']['template']['spec']
             for container in pod['containers'] + pod.get('initContainers', []):
                 container['image'] = components[component]['image']
@@ -362,7 +546,7 @@ def reconcile_infrastructure(environment, components):
             annotations['gthf.fr/source-revision'] = components[component]['revision']
             pod['containers'][0]['lifecycle'] = {'preStop': {'exec': {'command': ['node', '-e', 'setTimeout(()=>{},10000)']}}}
             if name != 'gthf-staging-gateway':
-                pod['containers'][0]['readinessProbe']['httpGet']['path'] = '/api/ready' if component == 'frontend' else '/api/release'
+                pod['containers'][0]['readinessProbe']['httpGet']['path'] = '/api/serving' if component == 'frontend' else '/api/release'
                 pod['containers'][0]['readinessProbe']['timeoutSeconds'] = 5
         old = kubectl(environment, 'get', resource['kind'], resource['metadata']['name'], '--ignore-not-found', '-o', 'json')
         previous.append((resource['kind'], resource['metadata']['name'], json.loads(old) if old else None))
@@ -370,21 +554,26 @@ def reconcile_infrastructure(environment, components):
         for resource in resources:
             if resource['kind'] in allowed and resource['kind'] != 'Deployment':
                 kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
-        for name in ('gthf-cms', 'gthf-frontend', 'gthf-staging-gateway'):
+        names = ('gthf-frontend', 'gthf-cms', 'gthf-staging-gateway') if cms_strategy == 'Recreate' else ('gthf-cms', 'gthf-frontend', 'gthf-staging-gateway')
+        for name in names:
             resource = next((value for value in resources if value['kind'] == 'Deployment' and value['metadata']['name'] == name), None)
             if resource:
-                kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
-                kubectl(environment, 'rollout', 'status', 'deployment/' + name, '--timeout=300s')
-                if name != 'gthf-staging-gateway':
-                    component = 'cms' if name == 'gthf-cms' else 'frontend'
-                    verify_components(environment, {component: components[component]})
+                with observe_cms_transition(monitor if name == 'gthf-cms' else None, cms_strategy if name == 'gthf-cms' else 'RollingUpdate', environment):
+                    kubectl(environment, 'apply', '-f', '-', data=json.dumps(resource).encode())
+                    kubectl(environment, 'rollout', 'status', 'deployment/' + name, '--timeout=300s')
+                    if name != 'gthf-staging-gateway':
+                        component = 'cms' if name == 'gthf-cms' else 'frontend'
+                        verify_components(environment, {component: components[component]}, evidence=evidence)
     except Exception:
         restore_infrastructure(environment, previous)
         raise
     return previous
 
 
-def restore_infrastructure(environment, resources):
+def restore_infrastructure(environment, resources, evidence=None):
+    for kind, name, previous in resources:
+        if kind == 'Deployment' and name == 'gthf-cms':
+            require_cms_rollback(environment, previous, evidence=evidence)
     for kind, name, previous in reversed(resources):
         if previous is None:
             kubectl(environment, 'delete', kind, name, '--ignore-not-found')
@@ -393,6 +582,17 @@ def restore_infrastructure(environment, resources):
             for key in ('resourceVersion', 'uid', 'creationTimestamp', 'managedFields', 'generation'):
                 previous['metadata'].pop(key, None)
             kubectl(environment, 'apply', '-f', '-', data=json.dumps(previous).encode())
+
+
+def require_cms_rollback(environment, deployment, evidence=None):
+    from media_rollback import require_media_rollback
+    proof = evidence if evidence is not None else {}
+    try:
+        require_media_rollback(environment, deployment, kubectl, command, proof)
+    except Exception as error:
+        error.media_rollback = proof
+        raise
+    return proof
 
 
 def activate(root, environment, candidate, recipe):
@@ -419,8 +619,12 @@ def activate(root, environment, candidate, recipe):
             require_isolated_staging_routes(ingresses['items'], alternate['items'])
         changed = changed_workloads(environment, previous['components'], combined)
         snapshots = snapshot_components(environment, changed)
+        cms_policy = cms_rollout_policy(previous['components']['cms'], snapshots['cms']) if 'cms' in changed else None
+        cms_strategy = cms_policy['strategy'] if cms_policy else 'RollingUpdate'
         infrastructure_snapshot = []
         report = {'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'environment': environment, 'components': combined, 'deployerRevision': candidate['deployerRevision']}
+        if cms_policy:
+            report['cmsTransition'] = cms_policy
         monitor = None
         if environment == 'production' and 'cms' in changed:
             report['backup'] = backup_database(root)
@@ -434,34 +638,42 @@ def activate(root, environment, candidate, recipe):
                 time.sleep(10)
                 monitor.require_available()
             if candidate.get('plan', {}).get('infrastructure'):
-                infrastructure_snapshot = reconcile_infrastructure(environment, combined)
-            for name in ('cms', 'frontend', 'gateway'):
+                infrastructure_snapshot = reconcile_infrastructure(environment, combined, cms_strategy=cms_strategy, monitor=monitor,
+                                                                   evidence=report.setdefault('componentVerification', []))
+            names = ('frontend', 'cms', 'gateway') if cms_strategy == 'Recreate' else ('cms', 'frontend', 'gateway')
+            for name in names:
                 if name in changed:
-                    if not infrastructure_snapshot:
-                        patch_component(environment, name, changed[name])
-                    verify_components(environment, {name: changed[name]})
-            verify_components(environment, combined)
+                    with observe_cms_transition(monitor if name == 'cms' and not infrastructure_snapshot else None, cms_strategy if name == 'cms' and not infrastructure_snapshot else 'RollingUpdate', environment):
+                        if not infrastructure_snapshot:
+                            if name == 'cms':
+                                patch_component(environment, name, changed[name], cms_strategy=cms_strategy)
+                            else:
+                                patch_component(environment, name, changed[name])
+                        verify_components(environment, {name: changed[name]}, evidence=report.setdefault('componentVerification', []))
+            verify_components(environment, combined, evidence=report.setdefault('componentVerification', []))
             if environment == 'staging':
                 verify_components(environment, {'gateway': combined['frontend']})
             command(['node', str(recipe), environment], timeout=600)
             if monitor:
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline:
-                    monitor.require_available()
-                    time.sleep(1)
+                monitor.wait_for_continuous_health(seconds=60)
                 report['monitoringAfter'] = prometheus_proof()
                 monitor.require_available()
                 monitor.stop.set()
                 monitor.thread.join(timeout=5)
                 if monitor.thread.is_alive() or monitor.expired or monitor.errors or monitor.samples < 3:
                     raise RuntimeError('Origin observation did not finish healthy')
-                report['originObservation'] = {'samples': monitor.samples, 'errors': [], 'expired': False}
+                report['originObservation'] = monitor.proof()
             report.update(status='success', finishedAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
             save_json(root / (environment + '.json'), report)
-        except Exception:
+        except Exception as error:
             report['status'] = 'failed'
+            if hasattr(error, 'media_rollback'):
+                report['mediaRollback'] = error.media_rollback
+            if 'cms' in snapshots:
+                report['mediaRollback'] = {}
+                require_cms_rollback(environment, snapshots['cms'], evidence=report['mediaRollback'])
             if infrastructure_snapshot:
-                restore_infrastructure(environment, infrastructure_snapshot)
+                restore_infrastructure(environment, infrastructure_snapshot, evidence=report.setdefault('mediaRollback', {}))
             # The schema compatibility check permits keeping additive columns during rollback.
             for name in reversed(('cms', 'frontend', 'gateway')):
                 if name in snapshots:
@@ -475,7 +687,7 @@ def activate(root, environment, candidate, recipe):
             if monitor:
                 monitor.stop.set()
                 monitor.thread.join(timeout=5)
-                report['originObservation'] = {'samples': monitor.samples, 'errors': monitor.errors, 'expired': monitor.expired}
+                report['originObservation'] = monitor.proof()
                 save_json(root / 'history' / (str(time.time_ns()) + '-origin-samples.json'), monitor.records)
             save_json(root / 'history' / (str(time.time_ns()) + '-' + environment + '.json'), report)
 

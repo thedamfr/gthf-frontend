@@ -3,11 +3,8 @@ import 'server-only';
 
 import { cache } from 'react';
 
-import {
-  decodeUtf8,
-  readResponseBytesWithLimit,
-  ResponseSizeLimitError,
-} from '../bounded-response';
+import { readCmsJson } from '../cms-read';
+import { validStrapiResponse } from '../strapi-response';
 import { guardCityItinerary } from './guard';
 import { itineraryStrapiCacheOptions, type ItineraryRequestKind } from './cache-policy';
 import {
@@ -31,7 +28,6 @@ import type {
 } from './types';
 
 const STRAPI_RESPONSE_LIMIT_BYTES = 6 * 1024 * 1024;
-const STRAPI_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
 const PAGE_SIZE = 100;
 const MAX_CATALOGUE_PAGES = 100;
 const RECOMMENDATION_SORTS = [
@@ -83,29 +79,15 @@ async function requestStrapiJson<T>(
   preview = false
 ): Promise<T> {
   const { baseUrl, token } = strapiConfiguration();
-  const response = await fetch(`${baseUrl}${pathname}?${query.toString()}`, {
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-    ...itineraryStrapiCacheOptions(requestKind, preview),
-    redirect: 'error',
-    signal: AbortSignal.timeout(STRAPI_REQUEST_TIMEOUT_MILLISECONDS),
+  const policy = itineraryStrapiCacheOptions(requestKind, preview);
+  return readCmsJson<T>(`${baseUrl}${pathname}?${query.toString()}`, {
+    token, public: !preview,
+    revalidate: 'next' in policy ? policy.next.revalidate : 0,
+    maximumBytes: STRAPI_RESPONSE_LIMIT_BYTES,
+    validate: (value) => requestKind === 'feature-switch'
+      ? validStrapiResponse(value, 'data')
+      : validStrapiResponse(value, undefined, true),
   });
-
-  if (!response.ok) {
-    throw new Error(`strapi_${response.status}`);
-  }
-
-  try {
-    const bytes = await readResponseBytesWithLimit(response, STRAPI_RESPONSE_LIMIT_BYTES);
-    return JSON.parse(decodeUtf8(bytes)) as T;
-  } catch (error) {
-    if (error instanceof ResponseSizeLimitError) {
-      throw new Error('strapi_response_too_large');
-    }
-    throw new Error('invalid_strapi_response');
-  }
 }
 
 export const getCatalogueFeatureState = cache(async (): Promise<CatalogueFeatureState> => {
@@ -415,6 +397,7 @@ export async function getGuardedItineraryBySlug(
 
 async function getRedirectTargetSlug(oldSlug: string): Promise<string | null> {
   const query = new URLSearchParams({
+    status: 'published',
     'filters[oldSlug][$eq]': oldSlug,
     'filters[enabled][$eq]': 'true',
     'fields[0]': 'oldSlug',

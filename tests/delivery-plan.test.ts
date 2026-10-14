@@ -39,3 +39,17 @@ test('infrastructure runbooks do not trigger reconciliation or a database rollou
   const updated = fingerprintEntries([['app/page.tsx', 'app'], ['infrastructure/README.md', 'new-guide'], ['infrastructure/docker/postgres/README.md', 'new-db-guide']]);
   assert.deepEqual(planDelivery(updated, initial), { build: false, infrastructure: false, postgres: false });
 });
+
+
+test('CMS candidate image requires history-retaining capability 2 at its expected revision', () => {
+  const revision = 'a'.repeat(40);
+  const image = (capability?: string) => ({ config: { Labels: { 'org.opencontainers.image.revision': revision, 'io.gthf.media-recovery': capability, 'io.gthf.media-batch-recovery': '1' } } });
+  requireImageRevision(image('2'), revision, 'cms');
+  for (const batch of ['', '0', '2']) {
+    const value = image('2'); value.config.Labels['io.gthf.media-batch-recovery'] = batch;
+    assert.throws(() => requireImageRevision(value, revision, 'cms'));
+  }
+  requireImageRevision(image(), revision, 'frontend');
+  for (const version of [undefined, '0', '1', '3']) assert.throws(() => requireImageRevision(image(version), revision, 'cms'));
+  assert.throws(() => requireImageRevision(image('2'), 'b'.repeat(40), 'cms'));
+});

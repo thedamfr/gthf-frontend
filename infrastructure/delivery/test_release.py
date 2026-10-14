@@ -48,6 +48,19 @@ class DeliveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.require_image_revision(config, 'expected-revision')
 
+    def test_candidate_cms_image_requires_capability_two_without_rejecting_historical_inspection(self):
+        def config(version):
+            return {'config': {'Labels': {'org.opencontainers.image.revision': 'expected', 'io.gthf.media-recovery': version, 'io.gthf.media-batch-recovery': '1'}}}
+        release.require_image_revision(config('2'), 'expected', 'cms')
+        for missing in (None, '0', '2'):
+            legacy = config('2'); legacy['config']['Labels']['io.gthf.media-batch-recovery'] = missing
+            with self.subTest(batch=missing), self.assertRaises(ValueError):
+                release.require_image_revision(legacy, 'expected', 'cms')
+        release.require_image_revision(config(None), 'expected')
+        for version in (None, '0', '1', '3'):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                release.require_image_revision(config(version), 'expected', 'cms')
+
     def test_candidate_images_bind_the_processed_revision_or_verified_reuse(self):
         previous = {'image': 'previous-image', 'revision': 'previous-revision', 'fingerprints': {'runtime': 'previous-runtime'}}
         current = {'image': 'new-image', 'revision': 'current-revision', 'processedRevision': 'current-revision', 'fingerprints': {'runtime': 'new-runtime'}}
@@ -166,7 +179,7 @@ class DeliveryTests(unittest.TestCase):
         calls = []
         saved = []
 
-        def verify(environment, components):
+        def verify(environment, components, evidence=None):
             if 'frontend' in components:
                 calls.append(('verify', components['frontend']['image']))
                 if components['frontend']['image'] == 'candidate':

@@ -8,10 +8,12 @@ import { accessSync } from 'node:fs';
 const standalone = resolve('.next/standalone');
 accessSync(resolve(standalone, 'server.js'));
 const revision = '9'.repeat(40);
+let cmsAvailable = false;
 const cms = createServer((request, response) => {
   if (request.headers.authorization !== 'Bearer runtime-test-fixture') {
     response.writeHead(401).end(); return;
   }
+  if (!cmsAvailable) { response.writeHead(503).end(); return; }
   const pathname = new URL(request.url, 'http://fixture.local').pathname;
   const data = pathname === '/api/global'
     ? { siteName: 'Runtime fixture' }
@@ -55,10 +57,25 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(ready, 'The built standalone server must start with runtime configuration');
+  assert.equal((await fetch(origin + '/api/serving')).status, 503, 'Cold admission must require the CMS');
+  assert.equal((await fetch(origin + '/api/ready')).status, 503, 'Strict readiness cannot succeed without the CMS');
+  cmsAvailable = true;
+  assert.equal((await fetch(origin + '/api/serving')).status, 200);
+  assert.equal((await fetch(origin + '/api/ready')).status, 200);
   const response = await fetch(origin + '/chapitres/runtime-chapter', { signal: AbortSignal.timeout(15000) });
   assert.equal(response.status, 200, 'A chapter absent at build time must render on its first request');
   assert.match(await response.text(), /<h1[^>]*>Chapitre de recette runtime<\/h1>/);
-  console.log('Standalone runtime chapter: passed');
+  cmsAvailable = false;
+  assert.equal((await fetch(origin + '/api/serving')).status, 200, 'An admitted process remains routed during the outage');
+  assert.equal((await fetch(origin + '/api/ready')).status, 503, 'Warm content must never validate a delivery');
+  const warm = await fetch(origin + '/chapitres/runtime-chapter', { signal: AbortSignal.timeout(15000) });
+  assert.equal(warm.status, 200);
+  assert.match(await warm.text(), /<h1[^>]*>Chapitre de recette runtime<\/h1>/);
+  const cold = await fetch(origin + '/chapitres/not-warmed', { signal: AbortSignal.timeout(15000) });
+  assert.ok(cold.status >= 500, 'Uncached content is temporarily unavailable, never falsely not-found');
+  cmsAvailable = true;
+  assert.equal((await fetch(origin + '/api/ready')).status, 200, 'Strict readiness recovers on a real dependency check');
+  console.log('Standalone runtime chapter, warm/cold outage and admission/readiness recovery: passed');
 } catch (error) {
   console.error(output);
   throw error;

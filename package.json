@@ -33,7 +33,9 @@
     "infra:staging:storage": ".tmp/ansible/bin/ansible-playbook -i infrastructure/ansible/inventories/ovh/hosts.yml infrastructure/ansible/playbooks/configure-staging-storage.yml",
     "infra:staging:data": ".tmp/ansible/bin/ansible-playbook -i infrastructure/ansible/inventories/ovh/hosts.yml infrastructure/ansible/playbooks/prepare-staging-data.yml",
     "infra:staging:media": ".tmp/ansible/bin/ansible-playbook -i infrastructure/ansible/inventories/ovh/hosts.yml infrastructure/ansible/playbooks/prepare-staging-media.yml",
-    "test:e2e": "node infrastructure/delivery/recipe.mjs"
+    "test:e2e": "node infrastructure/delivery/recipe.mjs",
+    "test:e2e:recovery": "node scripts/recovery/run.mjs",
+    "infra:recovery:images": "node scripts/recovery/prepare-images.mjs"
   },
   "dependencies": {
     "fast-xml-parser": "^5.10.1",

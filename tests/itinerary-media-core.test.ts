@@ -8,6 +8,23 @@ import {
   type ItineraryMediaLoadDependencies,
 } from '../lib/itineraries/media-core.ts';
 import { hashFixture, verifiedItineraryFixture } from './itinerary-fixtures.ts';
+import { VerifiedArtifactCache } from '../lib/itineraries/verified-artifact-cache.ts';
+
+test('verified public GPX remains available offline, while preview, changed SHA and untrusted URLs cannot reuse it', async () => {
+  const { guarded, gpxBytes } = verifiedItineraryFixture();
+  const publicCache = new VerifiedArtifactCache();
+  const online = { ...dependencies(async () => new Response(gpxBytes, { headers: { 'Content-Type': 'application/gpx+xml' } })), publicCache };
+  const first = await loadItineraryArtifactWithDependencies(guarded, 'gpx', online);
+  first.bytes.fill(0);
+  const offline = { ...dependencies(async () => { throw new Error('offline'); }), publicCache };
+  assert.deepEqual((await loadItineraryArtifactWithDependencies(guarded, 'gpx', offline)).bytes, gpxBytes);
+  await assert.rejects(loadItineraryArtifactWithDependencies(guarded, 'gpx', { ...offline, publicCache: undefined }), ItineraryArtifactUpstreamError);
+  const changed = structuredClone(guarded);
+  changed.revision.generatedGpxSha256 = hashFixture('0');
+  await assert.rejects(loadItineraryArtifactWithDependencies(changed, 'gpx', offline), ItineraryArtifactUpstreamError);
+  changed.revision.generatedGpx = { ...guarded.revision.generatedGpx!, url: 'http://169.254.169.254/private' };
+  await assert.rejects(loadItineraryArtifactWithDependencies(changed, 'gpx', offline), ItineraryArtifactIntegrityError);
+});
 
 function dependencies(
   fetchImpl: ItineraryMediaLoadDependencies['fetchImpl'],

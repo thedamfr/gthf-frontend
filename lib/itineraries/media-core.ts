@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { decodeUtf8, readResponseBytesWithLimit, ResponseSizeLimitError } from '../bounded-response.ts';
 import { resolveTrustedMediaUrl } from '../trusted-media-url.ts';
 import { parseItineraryDisplayGeometry } from './geometry.ts';
+import type { VerifiedArtifactCache } from './verified-artifact-cache.ts';
 import type { GuardedItinerary, ItineraryMedia } from './types';
 
 const GPX_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -25,6 +26,7 @@ export interface ItineraryMediaLoadDependencies {
   strapiBaseUrl: string;
   allowedOrigins: readonly string[];
   timeoutSignal: (milliseconds: number) => AbortSignal;
+  publicCache?: VerifiedArtifactCache;
 }
 
 export class ItineraryArtifactIntegrityError extends Error {
@@ -137,6 +139,14 @@ export async function loadItineraryArtifactWithDependencies(
     throw new ItineraryArtifactIntegrityError('untrusted_media_url');
   }
 
+  // The caller has already checked publication and feature access. Recheck all
+  // metadata before looking up immutable bytes; preview never supplies this cache.
+  const cacheKey = JSON.stringify([url, kind, expected.expectedSha256, entry.revision.revisionKey,
+    entry.revision.algorithmVersion, entry.revision.distanceMetres, entry.revision.elevationAvailable]);
+  const cached = dependencies.publicCache?.get(cacheKey);
+  if (cached) return { bytes: cached, contentType: kind === 'gpx' ? 'application/gpx+xml' : 'application/json',
+    filename: safeDownloadFilename(entry.dto.slug, kind), sha256: expected.expectedSha256.toLowerCase() };
+
   let response: Response;
   try {
     response = await dependencies.fetchImpl(url, {
@@ -193,6 +203,7 @@ export async function loadItineraryArtifactWithDependencies(
     }
   }
 
+  dependencies.publicCache?.set(cacheKey, bytes);
   return {
     bytes,
     contentType: kind === 'gpx' ? 'application/gpx+xml' : 'application/json',

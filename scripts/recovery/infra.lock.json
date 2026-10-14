@@ -1,0 +1,10 @@
+{
+  "repository": "thedamfr/infra-sincere",
+  "revision": "e2dde1aaad298be6a3f4c25e6267830bc3100cd6",
+  "controller": "scripts/qualification/vm.py",
+  "status": "candidate-requires-consumer-qualification",
+  "files": {
+    "vm.py": "3d8c9fb969329d9ef9b334e382cd374dae3376415ca44e6b921719e3ef97a1eb",
+    "provision-vm.py": "7f16362d927cab2f3e69a5bc86b6f0aa1f16cfc091b43d6b3acad2b716625725"
+  }
+}
