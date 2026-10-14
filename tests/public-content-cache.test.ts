@@ -24,6 +24,53 @@ test('malformed singleton responses preserve the last validated object, while co
 
 const url = 'http://cms.test/api/articles?status=published';
 
+test('confirmed singleton withdrawal revokes other projections and older in-flight responses in its credential scope', async () => {
+  const cache = new PublicContentCache();
+  const base = 'http://cms.test/api/homepage?status=published';
+  const populated = base + '&populate[0]=seo';
+  const options = { public: true, revalidate: 60, cache, token: 'first',
+    validate: (value: unknown) => validStrapiResponse(value, 'data') };
+  const publication = { data: { title: 'Published home', seo: { description: 'Public' } } };
+  const offline: typeof fetch = async () => { throw new Error('offline'); };
+  await readCmsJson(populated, { ...options, fetchImpl: async () => Response.json(publication) });
+  await readCmsJson(populated, { ...options, token: 'other', fetchImpl: async () => Response.json(publication) });
+  let complete!: (response: Response) => void;
+  const pending = readCmsJson(base + '&populate[0]=blocks', {
+    ...options, fetchImpl: () => new Promise((resolve) => { complete = resolve; }),
+  });
+  const withdrawn = { data: null };
+  assert.deepEqual(await readCmsJson(base, { ...options, fetchImpl: async () => Response.json(withdrawn) }), withdrawn);
+  complete(Response.json(publication));
+  await assert.rejects(pending, PublicContentUnavailable);
+  await assert.rejects(readCmsJson(populated, { ...options, fetchImpl: offline }), PublicContentUnavailable);
+  assert.deepEqual(await readCmsJson(base, { ...options, fetchImpl: offline }), withdrawn);
+  assert.deepEqual(await readCmsJson(populated, { ...options, token: 'other', fetchImpl: offline }), publication);
+});
+
+for (const collection of ['articles', 'chapters', 'city-itineraries']) {
+  test(`malformed ${collection} list members cannot replace the last public result or enter a cold cache`, async () => {
+    let now = 0;
+    const cache = new PublicContentCache(8192, () => now);
+    const endpoint = `http://cms.test/api/${collection}?status=published`;
+    const options = { public: true, revalidate: 0, cache,
+      validate: (value: unknown) => validStrapiResponse(value, undefined, true) };
+    const publication = { data: [{ documentId: 'published', slug: 'published', title: 'Published' }] };
+    await readCmsJson(endpoint, { ...options, fetchImpl: async () => Response.json(publication) });
+    for (const malformed of [[null], ['invalid'], [1], [false], [[]], [...publication.data, null]]) {
+      now += 1100;
+      const fetchImpl: typeof fetch = async () => Response.json({ data: malformed });
+      assert.deepEqual(await readCmsJson(endpoint, { ...options, fetchImpl }), publication);
+      await assert.rejects(readCmsJson(endpoint, { ...options, cache: new PublicContentCache(), fetchImpl }), PublicContentUnavailable);
+      now += 1100;
+      assert.deepEqual(await readCmsJson(endpoint, { ...options, fetchImpl: async () => { throw new Error('offline'); } }), publication);
+    }
+    now += 1100;
+    const replacement = { data: [{ ...publication.data[0], title: 'New publication' }] };
+    assert.deepEqual(await readCmsJson(endpoint, { ...options, fetchImpl: async () => Response.json(replacement) }), replacement);
+    assert.deepEqual(await readCmsJson(endpoint, { ...options, fetchImpl: async () => Response.json({ data: [] }) }), { data: [] });
+  });
+}
+
 test('warm published content survives timeout/invalid JSON, and refreshes after dependencies return', async () => {
   let now = 0;
   const cache = new PublicContentCache(4096, () => now);

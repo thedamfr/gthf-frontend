@@ -128,7 +128,8 @@ export async function readCmsJson<T>(url: string, options: CmsReadOptions): Prom
     withdrawsParent: (value) => (value as { data: unknown }).data === null,
     withdrawsScope: (value) => {
       const data = (value as { data: unknown }).data;
-      return !isGlobal && coversCollection(parsed) && Array.isArray(data) && data.length === 0;
+      return !isGlobal && (data === null
+        || (coversCollection(parsed) && Array.isArray(data) && data.length === 0));
     },
     tags: isGlobal ? (value) => globalFieldTags(value, globalSwitches) : entityTags,
     changedTags: isGlobal ? undefined : changedEntityTags,

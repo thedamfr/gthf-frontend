@@ -45,7 +45,7 @@ async function requestStrapiJson<T>(
     maximumBytes: STRAPI_RESPONSE_LIMIT_BYTES,
     validate: (value) => requestKind === 'feature-switch'
       ? validStrapiResponse(value, 'data')
-      : Array.isArray((value as { data?: unknown }).data),
+      : validStrapiResponse(value, undefined, true),
   });
 }
 
