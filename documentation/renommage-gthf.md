@@ -58,7 +58,7 @@ namespace, du PVC et de son PV préservé. Il ne peut pas amorcer une base vide.
 
 ### Qualification reproductible
 
-Depuis le checkout candidat, avec Node 24.19.0 comme en CI :
+Depuis le checkout candidat, avec Node 24.22.1 comme en CI :
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
